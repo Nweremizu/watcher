@@ -1915,7 +1915,7 @@ function Overlay() {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   const L = useRef({
     open, tool, sel, guides, space, dirty: false,
-    hover: null as HTMLElement | null, hoverSrc: '', g: null as Gesture | null, editing: null as HTMLElement | null,
+    hover: null as HTMLElement | null, hoverSrc: '', lastHov: null as DOMRect | null, g: null as Gesture | null, editing: null as HTMLElement | null,
     stopEdit: null as (() => void) | null, snaps: [] as SnapLine[], clip: null as HTMLElement | null,
     toggleCanvas: () => {}, close: () => {}, selGuide: null as number | null, href: location.href,
   }).current
@@ -2497,7 +2497,10 @@ function Overlay() {
           {flashes.map((f, i) => (
             <rect key={'f' + i} className={'flash-' + f.kind} opacity={1 - (now - f.t) / 700} x={o.x + f.b.l * z} y={o.y + f.b.t * z} width={f.b.w * z} height={f.b.h * z} />
           ))}
-          {hr && <rect className="hov" x={hr.left + 0.5} y={hr.top + 0.5} width={Math.max(0, hr.width - 1)} height={Math.max(0, hr.height - 1)} />}
+          {/* always mounted, so moving to another element morphs the outline (CSS transition) instead of jumping */}
+          {(hr || L.lastHov) && (() => { const b = hr ?? L.lastHov!; if (hr) L.lastHov = hr; return (
+            <rect className={'hov' + (hr ? '' : ' off')} style={{ x: b.left + 0.5, y: b.top + 0.5, width: Math.max(0, b.width - 1), height: Math.max(0, b.height - 1) }} />
+          ) })()}
           {!hr && target && <rect className="hov dash" x={target.left + 0.5} y={target.top + 0.5} width={Math.max(0, target.width - 1)} height={Math.max(0, target.height - 1)} />}
           {rings}
           {sr && <rect className="selr" x={sr.left} y={sr.top} width={sr.width} height={sr.height} />}
@@ -2740,6 +2743,7 @@ const CSS_TEXT = `
   position: fixed; inset: 0; pointer-events: none;
   font: 500 12px/16px "Watcher UI", "Timeless Sans", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--text); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
+  --goo: cubic-bezier(.3, 1.45, .45, 1);
   --primary: #f38020; --on-primary: #fff;
   --primary-soft: color-mix(in oklch, var(--primary) 16%, transparent);
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -2805,7 +2809,11 @@ const CSS_TEXT = `
 
 /* stage */
 .stage { position: absolute; inset: 0; overflow: visible; }
-/* hover = dashed, selection = solid */
+/* hover = dashed, selection = solid; the hover outline morphs between elements with a slight overshoot */
+.stage .hov { transition: x .32s var(--goo), y .32s var(--goo), width .32s var(--goo), height .32s var(--goo), opacity .18s; }
+.stage .hov.off { opacity: 0; }
+.htip { transition: left .32s var(--goo), top .32s var(--goo); }
+@media (prefers-reduced-motion: reduce) { .stage .hov, .htip { transition: none; } }
 .stage .hov { fill: none; stroke: var(--primary); stroke-width: 1.25; stroke-dasharray: 4 3; }
 .stage .selr { fill: none; stroke: var(--primary); stroke-width: 1.5; }
 .stage .mg { fill: oklch(82% .14 85 / .22); }

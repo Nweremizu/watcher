@@ -263,6 +263,29 @@ Select a `motion.div` (or any `motion.*` / `m.*` element) and the Animate tab ad
 
 Edits apply live and are undoable. **Apply to code** writes them into the JSX objects where you wrote them (`transition={{ type: "spring", bounce: 0.2 }}`), adding missing keys. When the prop is a constant in the same file (`variants={item}`, with `const item = { … }`, `as const` / `satisfies` included), the constant itself is edited. Values computed by expressions are left for you.
 
+### Adding animations
+
+**Add animation** (at the bottom of the Animate tab) offers five presets, tuned to feel responsive:
+
+| Preset | Motion | Tailwind |
+|---|---|---|
+| Fade in | `initial={{ opacity: 0 }}` → `animate`, 0.3s ease-out | `transition-opacity duration-300 ease-out starting:opacity-0` |
+| Slide up | 8px up while fading in, spring with bounce 0 | `starting:opacity-0 starting:translate-y-2` + transition |
+| Scale in | from 95% while fading in, spring with bounce 0 | `starting:opacity-0 starting:scale-95` + transition |
+| Press | `whileTap={{ scale: 0.96 }}` | `active:scale-[0.96] transition-transform` |
+| Hover lift | `whileHover={{ y: -2 }}` | `hover:-translate-y-0.5 transition-transform` |
+
+Clicking a preset previews it on the element (a Motion spring previews with its real curve), and shows exactly what it will add. **Add to code** writes it to the source straight away. Changing an element's type can't be previewed live, so presets go to your code instead of the Code panel, and your editor's undo takes them back.
+
+- **Motion** (the default when your project has `motion` or `framer-motion`): a plain `<div>` becomes `<motion.div>`, and `motion` is imported from the package you use. Props are merged into objects that are already there. After hot reload, the element shows up in the Motion sections, ready to tune.
+- **Tailwind:** the classes are added, and ones of the same kind are replaced (`duration-150` → `duration-300`). Transition lists are combined: adding Press to a card with `transition-shadow` gives `transition-[box-shadow,transform,…]`, so the hover shadow keeps animating. Enter presets use Tailwind's `starting:` variant (CSS `@starting-style`), so no keyframes are needed. They play when the element appears.
+
+### Keyframes and theme tokens
+
+**Keyframes:** a `@keyframes` section shows a track with a diamond for each keyframe. Pick one to edit, add or remove its values, or add a keyframe at any percentage. Edits apply to the page's stylesheet as you type, and they're undoable. **Apply to code** writes them to the CSS file Vite served the rule from, changing only that declaration. Keyframes that come from Tailwind or a package (like `pulse`) can't be edited where they live; copy them into your CSS first.
+
+**Theme tokens:** under the easing editor, **Save as a theme token…** adds the curve to your Tailwind theme as `--ease-<name>`. That goes in the first `@theme` block, or a new one after your imports. The element then uses it, and writes back as `ease-<name>`.
+
 **Motion check:** Watcher warns when a CSS transition (often Tailwind's `transition`) covers a property Motion animates. Motion sets that property every frame, each write restarts the CSS transition, and the motion turns mushy. The fix drops those properties from the CSS transition.
 
 **Limits:**
@@ -318,7 +341,7 @@ Edits you haven't applied yet, added elements, guides and canvas mode are saved 
 | | |
 |---|---|
 | **Production** | 0 bytes with Vite and webpack: the package's `production` export condition resolves to an empty module. Other bundlers still emit the lazy chunk, but a `NODE_ENV` check means it never loads. |
-| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~92 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
+| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~96 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
 | **Open** | It runs in its own shadow root and React root, so your app's CSS can't reach it and it never re-renders your tree. It redraws only when something it shows actually moved. |
 
 ## Features
@@ -341,7 +364,7 @@ Edits preview live on the page. They're kept per page until you apply or discard
 
 ```bash
 npm run dev     # demo app at http://localhost:5179, using src/ directly
-npm run check   # type-check + path, write-back, shortcut and guard checks
+npm run check   # type-check + path, write-back, shortcut, guard and CSS checks
 npm run build   # dist/: entry, production no-op, lazy overlay chunk, types
 npm run icons   # pull the latest Framework7 Icons and regenerate src/icons.ts
 ```

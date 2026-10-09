@@ -130,6 +130,30 @@ assert.deepEqual(out.results[0].skipped.map(s => s.prop), ['className.x'])
 out = editSource(`const x = <motion.div transition={{ duration: d }} />`, [{ loc: '1:10', props: { 'transition.duration': 1 } }])
 assert.deepEqual(out.results[0].skipped.map(s => s.prop), ['transition.duration'])
 
+// presets: grouped new objects (one transition={{…}}, not two), div → motion.div with its import
+out = editSource(`import { useState } from 'react'
+export const A = () => <div className="p-2">Hi</div>
+`, [{ loc: '2:23', motion: 'motion/react',
+  props: { 'initial.opacity': 0, 'initial.y': 8, 'animate.opacity': 1, 'animate.y': 0, 'transition.type': 'spring', 'transition.bounce': 0 } }])
+assert.ok(out.code.includes(`import { useState } from 'react'
+import { motion } from 'motion/react'`), out.code)
+assert.ok(out.code.includes(`<motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ type: "spring", bounce: 0 }} className="p-2">Hi</motion.div>`), out.code)
+out = editSource(`import { AnimatePresence } from "motion/react"
+const a = <span />
+`, [{ loc: '2:10', motion: 'motion/react', props: { 'whileTap.scale': 0.96 } }])
+assert.ok(out.code.includes(`import { AnimatePresence, motion } from "motion/react"`), out.code)
+assert.ok(out.code.includes(`<motion.span whileTap={{ scale: 0.96 }} />`), out.code)
+out = editSource(msrc, [{ loc: '3:23', props: { 'transition.type': 'spring', 'transition.bounce': 0, 'whileHover.y': -2 } }]) // already motion: no import twice
+assert.equal(out.code.match(/import \{[^}]*motion/g)!.length, 1)
+assert.ok(out.code.includes(`transition={{ duration: 0.3, ease: 'easeOut', type: "spring", bounce: 0 }}`), out.code)
+assert.ok(out.code.includes(`whileHover={{ y: -2 }}`), out.code)
+// Tailwind presets: same slot replaced, transitions unioned, `transition` kept
+const add = (cls: string, c: string[]) => editSource(`const a = <b className="${cls}" />`, [{ loc: '1:10', classes: c }]).code.match(/className="([^"]*)"/)![1]
+assert.equal(add('p-2 transition-shadow duration-150', ['transition-transform', 'duration-150', 'ease-out', 'active:scale-[0.96]']), 'p-2 transition-[box-shadow,transform,translate,scale,rotate] duration-150 ease-out active:scale-[0.96]')
+assert.equal(add('transition hover:translate-y-1', ['transition-transform', 'hover:-translate-y-0.5']), 'transition hover:-translate-y-0.5')
+assert.equal(add('', ['transition-[opacity,translate]', 'starting:opacity-0', 'starting:translate-y-2']), 'transition-[opacity,translate] starting:opacity-0 starting:translate-y-2')
+assert.equal(add('transition-opacity', ['transition-transform']), 'transition-[opacity,transform,translate,scale,rotate]')
+
 // forced states: rewrite pseudo-classes, but not escaped class names or media features
 assert.equal(forceSelectors('.btn:hover{color:red}'), '.btn[data-wforce~="hover"]{color:red}')
 assert.equal(forceSelectors('.hover\:bg-x{&:hover{@media (hover:hover){color:red}}}'), '.hover\:bg-x{&[data-wforce~="hover"]{@media (hover:hover){color:red}}}')

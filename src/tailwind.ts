@@ -195,3 +195,33 @@ export function mergeClasses(className: string, styles: Record<string, string>, 
   }
   return { className: tokens.join(' '), mapped, skipped }
 }
+
+// ── presets: adding utilities ───────────────────────────────────────────────
+// what each transition-* utility transitions (Tailwind's defaults, same in v3 and v4)
+const TRANSITION_SETS: Record<string, string[]> = {
+  'transition-colors': COLORS_T, 'transition-opacity': ['opacity'], 'transition-shadow': ['box-shadow'],
+  'transition-transform': ['transform', 'translate', 'scale', 'rotate'],
+}
+const transitionSet = (c: string) => TRANSITION_SETS[c] ?? /^transition-\[([^\]]+)\]$/.exec(c)?.[1].split(',')
+/** "transition-shadow" + "transition-transform" → "transition-[box-shadow,transform,translate,scale,rotate]";
+ *  plain `transition` and `transition-all` already cover everything a preset moves. */
+function unionTransition(a: string, b: string) {
+  if (a === 'transition' || a === 'transition-all' || b === 'transition-none') return a
+  const x = transitionSet(a), y = transitionSet(b)
+  if (!x || !y) return b
+  const all = [...new Set([...x, ...y])]
+  return Object.entries(TRANSITION_SETS).find(([, set]) => same(set, all))?.[0] ?? `transition-[${all.join(',')}]`
+}
+/** The slot a utility fills: its variants plus its root ("hover:-translate-y-0.5" → "hover:translate-y"). */
+const slot = (c: string) => { const m = /^((?:[^:[\]()]+:)*)-?([a-z]+(?:-[xy](?=-|$))?)/.exec(c); return m ? m[1] + m[2] : c }
+/** Add utilities from a preset to a className: each replaces whatever fills the same slot (duration-150 → duration-300). */
+export function addClasses(className: string, add: string[]) {
+  let tokens = className.split(/\s+/).filter(Boolean)
+  for (const c of add) {
+    const old = tokens.find(t => slot(t) === slot(c))
+    const next = old && slot(c) === 'transition' ? unionTransition(old, c) : c
+    tokens = tokens.filter(t => slot(t) !== slot(c))
+    tokens.push(next)
+  }
+  return tokens.join(' ')
+}

@@ -2,7 +2,7 @@
 // found by the `line:col` the Vite plugin stamped on it. Uses a real parser, never regexes on code.
 import { parse } from '@babel/parser'
 import MagicString from 'magic-string'
-import { mergeClasses, type Mapped, type Skipped, type TwVersion } from './tailwind.ts'
+import { addClasses, mergeClasses, type Mapped, type Skipped, type TwVersion } from './tailwind.ts'
 
 export type ElementEdit = {
   loc: string // "line:col" of the element's `<`
@@ -12,6 +12,8 @@ export type ElementEdit = {
   variant?: string // Tailwind variant for responsive / state edits, e.g. 'md:' or 'hover:'
   props?: Record<string, unknown> // component props, written where the component is used; null removes one.
                                    // A dotted name edits inside an object prop: 'transition.duration'
+  classes?: string[] // utilities to add (an animation preset); ones of the same kind and variant are replaced
+  motion?: string // make a plain element a motion one (<div> → <motion.div>), importing `motion` from this package
 }
 export type EditResult = {
   loc: string; ok: boolean; error?: string; note?: string
@@ -53,6 +55,10 @@ const jsValue = (v: unknown): string =>
   : Array.isArray(v) ? `[${v.map(jsValue).join(', ')}]`
   : v && typeof v === 'object' ? `{ ${Object.entries(v).map(([k, x]) => `${keyText(k)}: ${jsValue(x)}`).join(', ')} }`
   : JSON.stringify(v)
+/** A copy of `o` with `path` set. */
+const setIn = (o: unknown, path: string[], v: unknown): unknown =>
+  !path.length ? v : { ...(o && typeof o === 'object' ? o : {}), [path[0]]: setIn((o as Record<string, unknown> | undefined)?.[path[0]], path.slice(1), v) }
+type Leaf = [path: string[], value: unknown]
 type Obj = N & { properties: (N & { key: N & { name?: string; value?: string }; value: N; computed?: boolean })[] }
 const isPlain = (v: N & { elements?: N[]; expressions?: N[]; operator?: string; argument?: N; name?: string }): boolean =>
   LITERAL.test(v.type) || (v.type === 'Identifier' && v.name === 'Infinity') ||
@@ -80,6 +86,7 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
   }
   const ms = new MagicString(code)
   const results: EditResult[] = []
+  let needMotion = '' // a package to import `motion` from, once an element has become motion.*
 
   for (const e of edits) {
     const r: EditResult = { loc: e.loc, variant: e.variant, ok: true, mapped: [], skipped: [] }
@@ -96,37 +103,40 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       else if (a.end > a.name.end) { if (v) ms.overwrite(a.name.end, a.end, v); else ms.remove(a.name.end, a.end) }
       else if (v) ms.appendLeft(a.end, v)
     }
-    /** Set `path` inside the object prop `name`, adding whatever keys are missing. Returns why it couldn't, or null. */
-    const setDeep = (name: string, path: string[], value: unknown): string | null => {
-      const nest = (keys: string[]): unknown => keys.reduceRight<unknown>((acc, k) => ({ [k]: acc }), value)
-      const a = attrOf(name)
-      if (!a) { if (value != null) ms.appendLeft(afterName(op), ` ${name}={${jsValue(nest(path))}}`); return null }
-      let obj = a.value?.type === 'JSXExpressionContainer' ? asObject(a.value.expression) : null
-      if (!obj) return `${name} isn’t an object written in this file; edit it by hand`
-      for (let i = 0; i < path.length; i++) {
-        const prop = obj.properties.find(p => p.type === 'ObjectProperty' && !p.computed && (p.key.name ?? p.key.value) === path[i])
-        const last = i === path.length - 1
-        if (!prop) {
-          if (value == null) return null // nothing to remove
-          const text = `${keyText(path[i])}: ${jsValue(nest(path.slice(i + 1)))}`
-          const tail = obj.properties.at(-1)
-          if (tail) ms.appendLeft(tail.end, `, ${text}`); else ms.overwrite(obj.start, obj.end, `{ ${text} }`)
-          return null
-        }
-        if (last) {
-          if (!isPlain(prop.value)) return `${path.join('.')} is set by an expression; edit it by hand`
-          if (value == null) { // take the comma with it: the one after, or for the last key the one before
-            const ps = obj.properties, i = ps.indexOf(prop)
-            if (ps[i + 1]) ms.remove(prop.start, ps[i + 1].start); else if (ps[i - 1]) ms.remove(ps[i - 1].end, prop.end); else ms.remove(prop.start, prop.end)
-          }
-          else ms.overwrite(prop.value.start, prop.value.end, jsValue(value))
-          return null
+    /** New keys for an object, built once: several leaves under a missing parent become one nested object. */
+    const build = (ls: Leaf[]) => ls.reduce<unknown>((acc, [p, v]) => (v == null ? acc : setIn(acc, p, v)), undefined)
+    const removeProp = (obj: Obj, prop: Obj['properties'][number]) => { // take the comma with it: the one after, or for the last key the one before
+      const ps = obj.properties, i = ps.indexOf(prop)
+      if (ps[i + 1]) ms.remove(prop.start, ps[i + 1].start); else if (ps[i - 1]) ms.remove(ps[i - 1].end, prop.end); else ms.remove(prop.start, prop.end)
+    }
+    /** Write leaves (paths relative to `obj`) into an object literal. Returns why it couldn't, or null. */
+    const into = (obj: Obj, leaves: Leaf[], at: string): string | null => {
+      const groups = new Map<string, Leaf[]>()
+      for (const [p, v] of leaves) groups.set(p[0], [...(groups.get(p[0]) ?? []), [p.slice(1), v]])
+      const added: string[] = []
+      for (const [key, ls] of groups) {
+        const prop = obj.properties.find(p => p.type === 'ObjectProperty' && !p.computed && (p.key.name ?? p.key.value) === key)
+        const here = `${at}.${key}`, own = ls.find(([p]) => !p.length)
+        if (!prop) { const v = own ? own[1] : build(ls); if (v != null) added.push(`${keyText(key)}: ${jsValue(v)}`); continue }
+        if (own) {
+          if (!isPlain(prop.value)) return `${here} is set by an expression; edit it by hand`
+          if (own[1] == null) removeProp(obj, prop); else ms.overwrite(prop.value.start, prop.value.end, jsValue(own[1]))
+          continue
         }
         const next = asObject(prop.value)
-        if (!next) return `${path.slice(0, i + 1).join('.')} isn’t an object written in this file; edit it by hand`
-        obj = next
+        if (!next) return `${here} isn’t an object written in this file; edit it by hand`
+        const err = into(next, ls, here)
+        if (err) return err
       }
+      if (added.length) { const tail = obj.properties.at(-1); if (tail) ms.appendLeft(tail.end, `, ${added.join(', ')}`); else ms.overwrite(obj.start, obj.end, `{ ${added.join(', ')} }`) }
       return null
+    }
+    /** Set paths inside the object prop `name` (transition={{ … }}, or a const it names), adding what's missing. */
+    const setObject = (name: string, leaves: Leaf[]): string | null => {
+      const a = attrOf(name)
+      if (!a) { const v = build(leaves); if (v !== undefined) ms.appendLeft(afterName(op), ` ${name}={${jsValue(v)}}`); return null }
+      const obj = a.value?.type === 'JSXExpressionContainer' ? asObject(a.value.expression) : null
+      return obj ? into(obj, leaves, name) : `${name} isn’t an object written in this file; edit it by hand`
     }
     const writeText = (t: string) => {
       const kids = el.children
@@ -137,7 +147,16 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       return null
     }
 
-    if (e.styles && Object.keys(e.styles).length) {
+    if (e.motion && op.name.type === 'JSXIdentifier') {
+      if (!isIntrinsic(op)) { r.ok = false; r.error = 'only DOM elements can become motion elements'; continue }
+      const tag = `motion.${op.name.name}`, close = (el as El & { closingElement?: { name: N } | null }).closingElement
+      ms.overwrite(op.name.start, op.name.end, tag, { contentOnly: true })
+      if (close) ms.overwrite(close.name.start, close.name.end, tag, { contentOnly: true })
+      needMotion = e.motion
+      r.note = `now <${tag}>`
+    }
+
+    if ((e.styles && Object.keys(e.styles).length) || e.classes?.length) {
       const attr = op.attributes.find(a => a.type === 'JSXAttribute' && a.name.name === 'className')
       // where the class string lives: a plain string, a static template, or the first string passed to cn()/clsx()
       let lit: (N & { value?: string; quasis?: (N & { value: { raw: string } })[] }) | null = null
@@ -150,7 +169,8 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       }
       if (attr && !lit) { r.ok = false; r.error = 'className is computed at runtime; edit it by hand'; continue }
       const before = lit ? (lit.type === 'TemplateLiteral' ? lit.quasis![0].value.raw : lit.value ?? '') : ''
-      const m = mergeClasses(before, e.styles, e.variant ?? '', ver)
+      const m = mergeClasses(before, e.styles ?? {}, e.variant ?? '', ver)
+      if (e.classes?.length) m.className = addClasses(m.className, e.classes)
       r.before = before; r.after = m.className; r.mapped = m.mapped; r.skipped = m.skipped
       if (m.className !== before) {
         if (!lit) ms.appendLeft(afterName(op), ` className="${m.className}"`)
@@ -161,12 +181,13 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
 
     if (e.attrs) for (const [name, value] of Object.entries(e.attrs)) setAttr(name, value)
 
+    const deep = new Map<string, Leaf[]>() // dotted props, grouped by the prop they live in
     if (e.props) for (const [name, value] of Object.entries(e.props)) {
       const skip = (reason: string) => r.skipped.push({ prop: name, value: String(value), reason })
       if (name.includes('.')) {
         const [head, ...rest] = name.split('.')
-        const err = setDeep(head, rest, value)
-        if (err) { skip(err); continue }
+        deep.set(head, [...(deep.get(head) ?? []), [rest, value]])
+        continue
       } else if (name === 'children') {
         if (typeof value !== 'string') { skip('only text children are written'); continue }
         const err = writeText(value)
@@ -179,6 +200,13 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       }
       ;(r.props ??= []).push(name)
     }
+    for (const [head, leaves] of deep) {
+      const err = setObject(head, leaves)
+      for (const [p, v] of leaves) {
+        const name = [head, ...p].join('.')
+        if (err) r.skipped.push({ prop: name, value: String(v), reason: err }); else (r.props ??= []).push(name)
+      }
+    }
 
     if (e.text != null) {
       const err = writeText(e.text)
@@ -186,7 +214,21 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       r.text = true
     }
   }
+  if (needMotion) importMotion(ast, code, ms, needMotion)
   return { code: ms.toString(), results }
+}
+
+/** Make sure `motion` is imported: reuse an import from the package if there is one, else add a line after the imports. */
+function importMotion(ast: N, code: string, ms: MagicString, pkg: string) {
+  type Spec = N & { local: { name: string } }
+  type Imp = N & { source: N & { value: string }; specifiers: Spec[]; importKind?: string }
+  const imports = ((ast as N & { program: { body: N[] } }).program.body).filter(n => n.type === 'ImportDeclaration') as Imp[]
+  if (imports.some(i => i.specifiers.some(s => s.local.name === 'motion'))) return
+  const same = imports.find(i => i.source.value === pkg && i.importKind !== 'type' && i.specifiers.at(-1)?.type === 'ImportSpecifier')
+  if (same) { ms.appendLeft(same.specifiers.at(-1)!.end, ', motion'); return }
+  const q = imports[0] ? code[imports[0].source.start] : "'"
+  const line = `import { motion } from ${q}${pkg}${q}`
+  if (imports.length) ms.appendLeft(imports.at(-1)!.end, `\n${line}`); else ms.prepend(`${line}\n`)
 }
 
 const SKIP_COMPONENT = /^(Fragment|Provider|Consumer)$/ // Fragment rejects extra props; context wrappers render nothing

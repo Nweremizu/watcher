@@ -179,6 +179,7 @@ function invert(e: Edit): Edit {
   if (e.prop[0] === '@') return { ...e, before: el.getAttribute(e.prop.slice(1)) ?? '\u0000' }
   if (e.prop[0] === '%') return { ...e, before: encodeProp(getPath(currentProps(e.fiber!), e.prop.slice(1).split('.'))) }
   if (isStateKey(e.prop)) return { ...e, before: getStateRule(el, e.prop) }
+  if (e.prop[0] === '&') { const [n, off, cp] = e.prop.slice(1).split('|'); return { ...e, before: kfRule(el.ownerDocument, n, off, false)?.style.getPropertyValue(cp) || '\u0000' } }
   return { ...e, before: el.style.getPropertyValue(e.prop), imp: el.style.getPropertyPriority(e.prop) === 'important' }
 }
 function restore(e: Edit) {
@@ -188,6 +189,7 @@ function restore(e: Edit) {
   else if (e.prop === '#text') e.el.innerHTML = e.before
   else if (e.prop[0] === '%') writeProp(e.el, e.fiber!, e.prop.slice(1), e.before)
   else if (isStateKey(e.prop)) setStateRule(e.el, e.prop, e.before)
+  else if (e.prop[0] === '&') { const [n, off, cp] = e.prop.slice(1).split('|'); writeKeyframe(e.el.ownerDocument, n, off, cp, e.before) }
   else if (e.before) e.el.style.setProperty(e.prop, e.before, e.imp ? 'important' : '')
   else e.el.style.removeProperty(e.prop)
 }
@@ -1383,6 +1385,23 @@ function ChecksPanel({ rev, select }: { rev: number; select: (el: HTMLElement) =
 /** Bézier curve editor: drag the two handles, or pick a preset or one of the app's --ease-* tokens. */
 function EasingEditor({ value, duration, onChange, chips: showChips = true }: { value: string; duration: number; onChange: (v: string) => void; chips?: boolean }) {
   const p = parseEase(value)
+  const info = useServerInfo()
+  const [naming, setNaming] = useState<string | null>(null)
+  // a curve worth keeping becomes --ease-<name> in the theme, and this element uses it (written back as ease-<name>)
+  const save = async (raw: string) => {
+    const slug = raw.trim().toLowerCase().replace(/^--ease-|^ease-/, '').replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '')
+    if (!slug || !p) return
+    const name = `--ease-${slug}`, curve = bezText(p)
+    try {
+      const [r] = await postCss([{ kind: 'theme', name, value: curve }], false)
+      if (!r.ok) { notify(`Couldn’t save: ${r.error}`); return }
+      document.documentElement.style.setProperty(name, curve) // until Tailwind emits it (once a class uses it)
+      tokCache = null
+      onChange(`var(${name})`)
+      setNaming(null)
+      notify(`Saved ${name} in ${r.file}. Write this element back and it uses ease-${slug}.`)
+    } catch (e) { notify(`Couldn’t save: ${(e as Error).message}`) }
+  }
   const X = (t: number) => 16 + t * 168, Y = (v: number) => 126 - v * 102 // room above and below for overshoot
   const drag = (i: 0 | 1) => (e: RPointerEvent<SVGCircleElement>) => {
     e.preventDefault()
@@ -1416,13 +1435,117 @@ function EasingEditor({ value, duration, onChange, chips: showChips = true }: { 
       {showChips && <div className="ezchips">{chips.map(c => <button key={c.l + c.v} className={'ezchip' + (c.on ? ' on' : '')} onClick={() => onChange(c.v)}>{c.l}</button>)}</div>}
       <div className="eztrack" data-tip="Preview"><i className="ezdot" style={{ '--ez': value, '--ezd': `${Math.min(2000, Math.max(200, duration))}ms` } as CSSProperties} /></div>
       <Field mono value={value} onChange={onChange} />
+      {showChips && p && info?.theme && !value.startsWith('var(') && (naming == null
+        ? <button className="linkb" onClick={() => setNaming('')}>Save as a theme token…</button>
+        : <div className="kv"><span className="k mono">--ease-</span><div className="f"><input className="mono" autoFocus placeholder="snappy" value={naming} onChange={e => setNaming(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void save(naming); if (e.key === 'Escape') setNaming(null) }} spellCheck={false} /></div><button className="b xs" data-tip={`Add to ${info.theme}`} disabled={!naming.trim()} onClick={() => void save(naming)}><Icon d={P.check} size={12} /></button></div>)}
     </div>
   )
 }
-function KeyframeList({ el, name }: { el: HTMLElement; name: string }) {
+/** A track of the animation's keyframes; pick one to edit, add or remove its values. Written back to the CSS file. */
+function KeyframeEditor({ el, name }: { el: HTMLElement; name: string }) {
+  const [sel, setSel] = useState(0)
+  const [np, setNp] = useState(''), [nv, setNv] = useState(''), [off, setOff] = useState('')
   const r = keyframesRule(el.ownerDocument, name)
-  if (!r) return null
-  return <div className="kf">{[...r.cssRules].map((k, i) => <div key={i}><b>{(k as CSSKeyframeRule).keyText}</b><span>{(k as CSSKeyframeRule).style.cssText}</span></div>)}</div>
+  if (!r) return <p className="empty">@keyframes {name} isn’t in a stylesheet Watcher can read.</p>
+  const frames = [...r.cssRules] as CSSKeyframeRule[], k = frames[Math.min(sel, frames.length - 1)]
+  const file = sheetFile(r)
+  const pos = (o: string) => (o.trim() === 'from' ? 0 : o.trim() === 'to' ? 100 : parseFloat(o))
+  const add = () => { if (k && np.trim() && nv.trim()) { setKeyframeProp(el, name, k.keyText, np.trim(), nv.trim()); setNp(''); setNv('') } }
+  const addFrame = () => { const o = off.trim().replace(/^(\d*\.?\d+)$/, '$1%'); if (/^\d*\.?\d+%$/.test(o)) { r.appendRule(`${o} {}`); setSel(r.cssRules.length - 1); setOff(''); bump() } }
+  return (
+    <div className="kfe">
+      <div className="kftrack">
+        {frames.flatMap((f, i) => f.keyText.split(',').map(o => (
+          <button key={i + o} className={'kfd' + (f === k ? ' on' : '')} style={{ left: `${pos(o)}%` }} data-tip={f.keyText} onClick={() => setSel(i)} />
+        )))}
+      </div>
+      {k && <>
+        <Lbl>{k.keyText}</Lbl>
+        {[...k.style].map(prop => (
+          <div className="kv" key={prop}>
+            <span className="k mono" title={prop}>{prop}</span>
+            <Field mono value={k.style.getPropertyValue(prop)} onChange={v => setKeyframeProp(el, name, k.keyText, prop, v)} />
+            <button className="b xs" data-tip="Remove" onClick={() => setKeyframeProp(el, name, k.keyText, prop, '')}><Icon d={P.x} size={12} /></button>
+          </div>
+        ))}
+        <div className="kv">
+          <div className="f"><input className="mono" placeholder="opacity" value={np} onChange={e => setNp(e.target.value)} spellCheck={false} /></div>
+          <div className="f"><input className="mono" placeholder="0.5" value={nv} onChange={e => setNv(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} spellCheck={false} /></div>
+          <button className="b xs" data-tip="Add value" disabled={!np.trim() || !nv.trim()} onClick={add}><Icon d={P.plus} size={12} /></button>
+        </div>
+      </>}
+      <div className="kv kfadd">
+        <span className="k">Keyframe at</span>
+        <div className="f"><input className="mono" placeholder="25%" value={off} onChange={e => setOff(e.target.value)} onKeyDown={e => e.key === 'Enter' && addFrame()} spellCheck={false} /></div>
+        <button className="b xs" data-tip="Add keyframe" onClick={addFrame}><Icon d={P.plus} size={12} /></button>
+      </div>
+      {!file && <p className="stnote">Edits preview live, but this stylesheet wasn’t served by Vite, so they can’t be written back.</p>}
+    </div>
+  )
+}
+
+// ── presets: add an animation, previewed on the element, written as Motion props or Tailwind classes ──
+type Preset = { id: string; label: string; hint: string; motion: Vals; tw: string[]; frames: Keyframe[]; spring?: boolean; ms: number }
+const SPRING_IN = { type: 'spring', visualDuration: 0.3, bounce: 0 } // settles without a wobble
+const PRESETS: Preset[] = [
+  { id: 'fade', label: 'Fade in', hint: 'opacity, 300ms ease-out', ms: 300, motion: { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { duration: 0.3, ease: 'easeOut' } }, tw: ['transition-opacity', 'duration-300', 'ease-out', 'starting:opacity-0'], frames: [{ opacity: 0 }, { opacity: 1 }] },
+  { id: 'slide', label: 'Slide up', hint: '8px up while fading in', ms: 300, spring: true, motion: { initial: { opacity: 0, y: 8 }, animate: { opacity: 1, y: 0 }, transition: SPRING_IN }, tw: ['transition-[opacity,translate]', 'duration-300', 'ease-out', 'starting:opacity-0', 'starting:translate-y-2'], frames: [{ opacity: 0, translate: '0 8px' }, { opacity: 1, translate: '0 0' }] },
+  { id: 'scale', label: 'Scale in', hint: 'from 95% while fading in', ms: 300, spring: true, motion: { initial: { opacity: 0, scale: 0.95 }, animate: { opacity: 1, scale: 1 }, transition: SPRING_IN }, tw: ['transition-[opacity,scale]', 'duration-300', 'ease-out', 'starting:opacity-0', 'starting:scale-95'], frames: [{ opacity: 0, scale: '0.95' }, { opacity: 1, scale: '1' }] },
+  { id: 'press', label: 'Press', hint: 'scale 0.96 while pressed', ms: 360, motion: { whileTap: { scale: 0.96 } }, tw: ['transition-transform', 'duration-150', 'ease-out', 'active:scale-[0.96]'], frames: [{ scale: '1' }, { scale: '0.96', offset: 0.4 }, { scale: '1' }] },
+  { id: 'lift', label: 'Hover lift', hint: '2px up on hover', ms: 600, motion: { whileHover: { y: -2 } }, tw: ['transition-transform', 'duration-150', 'ease-out', 'hover:-translate-y-0.5'], frames: [{ translate: '0 0' }, { translate: '0 -2px', offset: 0.35 }, { translate: '0 -2px', offset: 0.65 }, { translate: '0 0' }] },
+]
+/** Motion's spring as a CSS linear() easing, so a preview moves the way the real spring will. */
+function springEasing(t: Vals) {
+  const { pts, settle } = springCurve(t)
+  const end = pts.at(-1)?.[0] ?? 1
+  return { easing: `linear(${pts.filter((_, i) => i % 3 === 0).map(([s, x]) => `${round(x, 3)} ${round((s / end) * 100, 1)}%`).join(', ')}, 1 100%)`, ms: Math.max(200, settle * 1000) }
+}
+/** Nested objects as dotted leaves: { initial: { y: 8 } } → { 'initial.y': 8 } */
+const flatten = (v: Vals, at = ''): Vals => Object.fromEntries(Object.entries(v).flatMap(([k, x]) => (isObj(x) ? Object.entries(flatten(x, `${at}${k}.`)) : [[`${at}${k}`, x]])))
+const jsLike = (v: unknown) => toJson(v).replace(/"(\w+)":/g, '$1: ').replace(/,(?=\S)/g, ', ').replace(/^\{/, '{ ').replace(/\}$/, ' }')
+function AddAnimation({ el }: { el: HTMLElement }) {
+  const info = useServerInfo()
+  const [pick, setPick] = useState<string | null>(null), [mode, setMode] = useState<'motion' | 'tailwind' | null>(null), [busy, setBusy] = useState(false)
+  const src = sourceOf(el), mf = motionFiber(el)
+  if (info === undefined) return null
+  const out = mode ?? (info?.motion || mf ? 'motion' : 'tailwind')
+  const p = PRESETS.find(x => x.id === pick)
+  const preview = (x: Preset) => {
+    setPick(x.id)
+    const sp = x.spring && out === 'motion' ? springEasing(SPRING_IN) : null
+    const a = el.animate(x.frames, { duration: sp?.ms ?? x.ms, easing: sp?.easing ?? 'cubic-bezier(0, 0, 0.2, 1)' })
+    a.updatePlaybackRate(rec.rate)
+  }
+  const add = async () => {
+    if (!p || !src || !info) return
+    setBusy(true)
+    try {
+      const edit = out === 'motion' ? { props: flatten(p.motion), motion: mf ? undefined : info.motion ?? 'motion/react' } : { classes: p.tw }
+      const res = await postApply([{ els: [el], file: src.file, loc: src.loc, line: src.line, styles: {}, variant: '', repeats: 1, ...edit }], false)
+      const r = res.files[0]?.results[0]
+      if (r?.ok && !r.skipped.length) notify(`Added “${p.label}” to ${src.file.split('/').pop()}:${src.line}. Your editor’s undo takes it back.`)
+      else notify(`Couldn’t add it: ${r?.error ?? r?.skipped[0]?.reason ?? res.error ?? 'unknown error'}`)
+    } catch (e) { notify(`Couldn’t add it: ${(e as Error).message}`) }
+    setBusy(false)
+  }
+  const repeats = src ? el.ownerDocument.querySelectorAll(`[data-wsrc="${el.getAttribute('data-wsrc')!.replace(/"/g, '\\"')}"]`).length : 0
+  const tag = mf ? typeName(mf.type)! : `motion.${el.tagName.toLowerCase()}`
+  return (
+    <Section title="Add animation">
+      {!info ? <p className="empty">Add the <code>watcher-ui/vite</code> plugin to add animations to your code.</p>
+        : !src ? <p className="empty">This element isn’t in your source (a library component, or added in canvas mode).</p>
+        : <>
+          {(info.motion || mf) && <Seg value={out} options={[['motion', 'Motion'], ['tailwind', 'Tailwind']] as const} onChange={setMode} />}
+          <div className="presets">{PRESETS.map(x => <button key={x.id} className={'preset' + (pick === x.id ? ' on' : '')} onClick={() => preview(x)}><b>{x.label}</b><span>{x.hint}</span></button>)}</div>
+          {p && <>
+            <pre className="pcode">{out === 'motion' ? `<${tag} ${Object.entries(p.motion).map(([k, v]) => `${k}={${jsLike(v)}}`).join(' ')}>` : p.tw.join(' ')}</pre>
+            {out === 'tailwind' && /^(fade|slide|scale)$/.test(p.id) && <p className="stnote">Plays when the element appears, using CSS <code>@starting-style</code> (Tailwind’s <code>starting:</code>).</p>}
+            {repeats > 1 && <p className="cwarn">This line renders {repeats} elements; all of them get it.</p>}
+            <button className="b sm apply addanim" disabled={busy} onClick={() => void add()}><Icon d={P.code} size={14} />{busy ? 'Adding…' : 'Add to code'}</button>
+          </>}
+        </>}
+    </Section>
+  )
 }
 /** One state's values (opacity, x, scale…): numbers scrub, strings type, add or remove a key. */
 function MotionValues({ values, set }: { values: Vals; set: (k: string, v: unknown) => void }) {
@@ -1604,10 +1727,11 @@ function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement 
           <Lbl>Easing</Lbl>
           <EasingEditor value={at(cs.animationTimingFunction, i)} duration={toMs(at(cs.animationDuration, i))} onChange={setAt('animation-timing-function', i)} />
           <Lbl>Keyframes</Lbl>
-          <KeyframeList el={el} name={n} />
+          <KeyframeEditor el={el} name={n} />
           <button className="wide" onClick={() => replayKeyframes(el)}><Icon d={P.replay} />Replay</button>
         </Section>
       ))}
+      <AddAnimation el={el} />
       <p className="stnote">Press <kbd>M</kbd> for the timeline: it catches animations as they run, and replays them at 25% or 10% speed.{mf && ' Motion runs some values (springs on x, y, scale) in JavaScript; those don’t show there, so replay them here.'}</p>
     </>
   )
@@ -2102,6 +2226,45 @@ function keyframesRule(doc: Document, name: string): CSSKeyframesRule | null {
   for (const sh of doc.styleSheets) { try { const f = walk(sh.cssRules); if (f) return f } catch { /* cross-origin sheet */ } }
   return null
 }
+// keyframe edits live in the page's stylesheet; history keys look like "&float|50%|translate"
+function kfRule(doc: Document, name: string, off: string, create: boolean) {
+  const r = keyframesRule(doc, name)
+  if (!r) return null
+  let k = r.findRule(off)
+  if (!k && create) { r.appendRule(`${off} {}`); k = r.findRule(off) }
+  return k
+}
+function writeKeyframe(doc: Document, name: string, off: string, prop: string, v: string) {
+  const k = kfRule(doc, name, off, !!v && v !== '\u0000')
+  if (!k) return
+  if (!v || v === '\u0000') k.style.removeProperty(prop); else k.style.setProperty(prop, v)
+}
+function setKeyframeProp(el: HTMLElement, name: string, off: string, prop: string, v: string) {
+  record(el, `&${name}|${off}|${prop}`, () => kfRule(el.ownerDocument, name, off, false)?.style.getPropertyValue(prop) || '\u0000')
+  writeKeyframe(el.ownerDocument, name, off, prop, v)
+  bump()
+}
+/** The file a rule came from: Vite tags the <style> it injects with its path. */
+const sheetFile = (r: CSSRule) => (r.parentStyleSheet?.ownerNode as Element | null)?.getAttribute?.('data-vite-dev-id') ?? null
+
+// what the Vite plugin knows about the project: Tailwind version, Motion package, the theme stylesheet
+type ServerInfo = { tailwind: number; motion: string | null; theme: string | null }
+let infoP: Promise<ServerInfo | null> | null = null
+const serverInfo = () => (infoP ??= fetch('/__watcher/ping').then(r => (r.ok ? r.json() : null)).then(j => (j?.ok ? j : null)).catch(() => null))
+function useServerInfo() {
+  const [info, setInfo] = useState<ServerInfo | null | undefined>(undefined)
+  useEffect(() => { void serverInfo().then(setInfo) }, [])
+  return info
+}
+type CssEdit = { kind: 'keyframes'; file: string; name: string; offset: string; prop: string; value: string | null } | { kind: 'theme'; name: string; value: string }
+type CssResult = { ok: boolean; error?: string; file?: string }
+async function postCss(edits: CssEdit[], dryRun: boolean): Promise<CssResult[]> {
+  const r = await fetch('/__watcher/css', { method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' }, body: JSON.stringify({ dryRun, edits }) })
+  const j = await r.json()
+  if (j.error) throw new Error(j.error)
+  return j.results
+}
+
 /** Play a state's transition: back to rest, into the state, hold, then back to whatever was showing. */
 function playState(el: HTMLElement, st: State) {
   const was = forced.get(el) ?? null, cs = getComputedStyle(el)
@@ -2703,15 +2866,16 @@ type SrcResult = { loc: string; ok: boolean; error?: string; note?: string; befo
   mapped: { prop: string; value: string; cls: string }[]; skipped: { prop: string; value: string; reason: string }[]; props?: string[]; variant?: string }
 type ApplyResponse = { files: { file: string; changed: boolean; results: SrcResult[] }[]; error?: string }
 type Pending = { els: HTMLElement[]; file: string; loc: string; line: number; styles: Record<string, string>; text?: string; attrs?: Record<string, string | null>; variant: string; repeats: number
-  props?: Record<string, unknown>; state?: string; comp?: string }
+  props?: Record<string, unknown>; state?: string; comp?: string; classes?: string[]; motion?: string }
 const BREAKPOINTS: [string, number][] = [['sm', 640], ['md', 768], ['lg', 1024], ['xl', 1280], ['2xl', 1536]]
 /** "file:line:col" stamped by the Vite plugin. */
 const parseSrc = (s: string) => { const m = /^(.*):(\d+):(\d+)$/.exec(s); return m ? { file: m[1], line: +m[2], col: +m[3], loc: `${m[2]}:${m[3]}` } : null }
 const sourceOf = (el: Element) => parseSrc(el.getAttribute('data-wsrc') ?? '')
 const openInEditor = (el: Element) => { const s = sourceOf(el); if (s) void fetch(`/__open-in-editor?file=${encodeURIComponent(`${s.file}:${s.line}:${s.col + 1}`)}`) }
 /** Edits that can go to source, grouped by the JSX element (and variant) they came from. */
+type PendingCss = { key: string; els: HTMLElement[]; edit: Extract<CssEdit, { kind: 'keyframes' }> }
 function pendingEdits() {
-  const byKey = new Map<string, Pending>(), orphans: HTMLElement[] = []
+  const byKey = new Map<string, Pending>(), orphans: HTMLElement[] = [], css = new Map<string, PendingCss>()
   const put = (el: HTMLElement, src: { file: string; loc: string; line: number }, variant: string, part: Partial<Pending>, repeats: number) => {
     const key = `${src.file}|${src.loc}|${variant}`, prev = byKey.get(key)
     if (!prev) { byKey.set(key, { els: [el], file: src.file, loc: src.loc, line: src.line, variant, styles: {}, repeats, ...part }); return }
@@ -2726,6 +2890,13 @@ function pendingEdits() {
     let text: string | undefined
     for (const p of props) {
       if (p === '#text') text = el.textContent?.trim() ?? ''
+      else if (p[0] === '&') { // a keyframe declaration: written to the stylesheet it came from
+        const [name, offset, prop] = p.slice(1).split('|'), rule = keyframesRule(el.ownerDocument, name), file = rule && sheetFile(rule)
+        if (!file) { orphans.push(el); continue }
+        const prev = css.get(p)
+        if (prev) prev.els.push(el)
+        else css.set(p, { key: p, els: [el], edit: { kind: 'keyframes', file, name, offset, prop, value: kfRule(el.ownerDocument, name, offset, false)?.style.getPropertyValue(prop) || null } })
+      }
       else if (p[0] === '@') attrs[p.slice(1)] = el.getAttribute(p.slice(1))
       else if (p[0] === '%') {
         const f = hist.filter(h => h.el === el && h.prop === p).at(-1)?.fiber
@@ -2750,12 +2921,12 @@ function pendingEdits() {
     if (own) put(el, src, variant, { styles, text, attrs: Object.keys(attrs).length ? attrs : undefined }, repeats)
     for (const [st, css] of Object.entries(inState)) put(el, src, variant + st + ':', { styles: css, state: st }, repeats)
   }
-  return { items: [...byKey.values()], orphans }
+  return { items: [...byKey.values()], orphans, css: [...css.values()] }
 }
 async function postApply(items: Pending[], dryRun: boolean): Promise<ApplyResponse> {
   const r = await fetch('/__watcher/apply', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' },
-    body: toJson({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant, props }) => ({ file, loc, styles, text, attrs, variant, props })) }),
+    body: toJson({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant, props, classes, motion }) => ({ file, loc, styles, text, attrs, variant, props, classes, motion })) }),
   })
   return r.json()
 }
@@ -2794,23 +2965,38 @@ function CodePanel({ rev }: { rev: number }) {
   useEffect(() => {
     fetch('/__watcher/ping').then(r => (r.ok ? r.json() : null)).then(j => setServer(j?.ok ? j.tailwind : 'missing')).catch(() => setServer('missing'))
   }, [])
-  const { items, orphans } = pendingEdits()
+  const { items, orphans, css } = pendingEdits()
   const key = JSON.stringify(items.map(i => [i.file, i.loc, i.variant, i.styles, i.text, i.attrs, i.props]))
+  const cssKey = JSON.stringify(css.map(c => c.edit))
+  const [cssPlan, setCssPlan] = useState<CssResult[] | null>(null)
   useEffect(() => {
     if (typeof server !== 'number' || !items.length) { setPlan(null); return }
     let alive = true
     postApply(items, true).then(p => { if (alive) setPlan(p) }).catch(() => {})
     return () => { alive = false }
   }, [key, server]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (typeof server !== 'number' || !css.length) { setCssPlan(null); return }
+    let alive = true
+    postCss(css.map(c => c.edit), true).then(p => { if (alive) setCssPlan(p) }).catch(() => {})
+    return () => { alive = false }
+  }, [cssKey, server]) // eslint-disable-line react-hooks/exhaustive-deps
+  const cssReady = css.filter((_, i) => cssPlan?.[i]?.ok)
   const resultFor = (it: Pending) => plan?.files.find(f => f.file === it.file)?.results.find(r => r.loc === it.loc && (r.variant ?? '') === it.variant)
   const writable = items.filter(it => { const r = resultFor(it); return r?.ok && (r.mapped.length || r.text || it.attrs || r.props?.length) })
   const apply = async () => {
     setBusy(true)
     try {
-      const res = await postApply(writable, false)
+      const res = writable.length ? await postApply(writable, false) : { files: [] }
       let n = 0
       for (const it of writable) { const r = res.files.find(f => f.file === it.file)?.results.find(x => x.loc === it.loc && (x.variant ?? '') === it.variant); if (r?.ok) { settle(it, r); n++ } }
-      const files = res.files.filter(f => f.changed).length
+      let files = res.files.filter(f => f.changed).length
+      if (cssReady.length) {
+        // the stylesheet now says it; the CSSOM edit and its undo entries can go
+        const done = await postCss(cssReady.map(c => c.edit), false)
+        cssReady.forEach((c, i) => { if (!done[i]?.ok) return; n++; for (let j = hist.length - 1; j >= 0; j--) if (hist[j].prop === c.key) hist.splice(j, 1) })
+        files += new Set(done.filter(d => d.ok).map(d => d.file)).size
+      }
       notify(`Wrote ${n} element${n === 1 ? '' : 's'} to ${files} file${files === 1 ? '' : 's'}`)
       bump()
     } catch (e) { notify(`Couldn't write: ${(e as Error).message}`) }
@@ -2828,7 +3014,14 @@ function CodePanel({ rev }: { rev: number }) {
 plugins: [watcher(), react(), tailwindcss()]`}</pre>
           </div>
         )}
-        {typeof server === 'number' && !items.length && <p className="empty pad">No edits yet. Change something in the inspector and it shows up here as Tailwind {server === 3 ? 'v3' : 'v4'} classes, ready to write to your code.</p>}
+        {css.map((c, i) => (
+          <div key={c.key} className="citem">
+            <div className="chead"><b>@keyframes {c.edit.name}</b><span className="cvar">{c.edit.offset}</span><span className="sp" /><span className="clink">{c.edit.file.split('/').pop()}</span></div>
+            {cssPlan?.[i]?.error ? <p className="cerr">{cssPlan[i].error}</p> : <div className="cmap"><span>{c.edit.prop}</span><code>{c.edit.value ?? 'removed'}</code></div>}
+            <button className="b sm cdiscard" onClick={() => c.els.forEach(el => resetEdits(el))}>Discard</button>
+          </div>
+        ))}
+        {typeof server === 'number' && !items.length && !css.length && <p className="empty pad">No edits yet. Change something in the inspector and it shows up here as Tailwind {server === 3 ? 'v3' : 'v4'} classes, ready to write to your code.</p>}
         {items.map(it => {
           const r = resultFor(it)
           return (
@@ -2856,8 +3049,8 @@ plugins: [watcher(), react(), tailwindcss()]`}</pre>
         {orphans.length > 0 && <p className="empty pad">{orphans.length} edited element{orphans.length === 1 ? ' isn’t' : 's aren’t'} in your source (a library component, or added in canvas mode), so {orphans.length === 1 ? 'it' : 'they'} can only be copied as CSS.</p>}
       </div>
       <div className="foot">
-        <span>{writable.length ? `${writable.length} ready` : typeof server === 'number' ? 'Nothing to write' : server === 'missing' ? 'Plugin not found' : 'Connecting…'}</span>
-        <button className="b sm apply" disabled={busy || !writable.length} onClick={apply}><Icon d={P.code} size={14} />{busy ? 'Writing…' : 'Apply to code'}</button>
+        <span>{writable.length + cssReady.length ? `${writable.length + cssReady.length} ready` : typeof server === 'number' ? 'Nothing to write' : server === 'missing' ? 'Plugin not found' : 'Connecting…'}</span>
+        <button className="b sm apply" disabled={busy || !(writable.length + cssReady.length)} onClick={apply}><Icon d={P.code} size={14} />{busy ? 'Writing…' : 'Apply to code'}</button>
       </div>
     </>
   )
@@ -4194,6 +4387,22 @@ const CSS_TEXT = `
 .spring span { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .linkb { all: unset; display: block; margin: 2px 0 6px; font-size: 11px; color: var(--primary); cursor: pointer; }
 .linkb:hover { text-decoration: underline; }
+.kftrack { position: relative; height: 22px; margin: 2px 7px 8px; border-radius: 6px; background: linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat; }
+.kfd { all: unset; position: absolute; top: 50%; width: 10px; height: 10px; translate: -50% -50%; rotate: 45deg; border-radius: 2px; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--text-muted); cursor: pointer; transition: background-color .12s, box-shadow .12s; }
+.kfd:hover { box-shadow: inset 0 0 0 1.5px var(--text); }
+.kfd.on { background: var(--primary); box-shadow: none; }
+.kfadd { margin-top: 6px; }
+.kfadd .k { font-size: 11px; color: var(--text-muted); }
+.presets { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 8px 0; }
+.preset { all: unset; display: grid; gap: 1px; padding: 7px 8px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--border); cursor: pointer; transition: background-color .12s, box-shadow .12s, scale .12s cubic-bezier(0.2, 0, 0, 1); }
+.preset:hover { background: var(--bg-hover); }
+.preset:active { scale: 0.96; }
+.preset.on { box-shadow: inset 0 0 0 1.5px var(--primary); }
+.preset b { font-size: 12px; font-weight: 600; color: var(--text); }
+.preset span { font-size: 10.5px; color: var(--text-muted); }
+.pcode { margin: 0 0 6px; padding: 8px; border-radius: 8px; background: var(--input); box-shadow: var(--shadow-inset-field); font-family: var(--mono); font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.addanim { width: 100%; justify-content: center; margin-top: 2px; background: var(--primary); color: var(--on-primary); font-weight: 600; }
+.addanim:hover { background: var(--primary); color: var(--on-primary); filter: brightness(1.05); }
 .kf { display: grid; gap: 3px; margin: 2px 0 8px; font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); }
 .kf div { display: flex; gap: 8px; min-width: 0; }
 .kf b { flex: none; min-width: 36px; color: var(--text); font-weight: 500; }

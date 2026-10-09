@@ -1,0 +1,54 @@
+{
+  "name": "watcher-ui",
+  "version": "0.1.0",
+  "description": "Open your running React app like a design file: rulers, live style editing, canvas mode, an SVG editor, design-system extraction and a profiler. Dev-only, zero bytes in production.",
+  "keywords": [
+    "react",
+    "devtools",
+    "design",
+    "inspector",
+    "figma",
+    "overlay",
+    "css",
+    "svg-editor",
+    "design-system"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "production": "./dist/noop.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "assets/logo.svg"
+  ],
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --config vite.lib.config.ts && tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit && node checks/path.check.ts",
+    "icons": "npm i -D framework7-icons@latest && node scripts/icons.ts",
+    "prepublishOnly": "npm run check && npm run build"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "framework7-icons": "^5.0.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}

@@ -52,6 +52,38 @@ const WEIGHT: Record<string, string> = { 100: 'thin', 200: 'extralight', 300: 'l
 const RADIUS: Record<number, string> = { 0: 'none', 6: 'md', 8: 'lg', 12: 'xl', 16: '2xl', 24: '3xl' }
 
 type Rule = { cls: (v: string, ver: TwVersion) => string | null; family: (cls: string) => boolean }
+
+// motion: durations, delays, easing curves and which properties transition
+const ms = (v: string) => { const m = /^(-?\d*\.?\d+)(ms|s)$/.exec(v.trim()); return m ? Math.round(+m[1] * (m[2] === 's' ? 1000 : 1)) : null }
+const DURATIONS3 = [0, 75, 100, 150, 200, 300, 500, 700, 1000] // v3's scale; v4 takes any number
+const hasList = (v: string) => { let d = 0; for (const ch of v) { if (ch === '(') d++; else if (ch === ')') d--; else if (ch === ',' && !d) return true } return false }
+const time = (prefix: string): Rule => ({
+  cls: (v, ver) => { const n = hasList(v) ? null : ms(v); return n === null || n < 0 ? null : ver === 4 || DURATIONS3.includes(n) ? `${prefix}-${n}` : `${prefix}-[${n}ms]` },
+  family: (c: string) => new RegExp(`^${prefix}-(\\d+|\\[[^\\]]+\\])$`).test(c),
+})
+/** "cubic-bezier(.4,0,.2,1)" and "cubic-bezier(0.4, 0, 0.2, 1)" are the same curve. */
+export const normEase = (v: string) => v.trim().replace(/cubic-bezier\(([^)]*)\)/, (_, a: string) => `cubic-bezier(${a.split(',').map(n => +n).join(', ')})`)
+const EASES: Record<string, string> = { // Tailwind's own curves (same in v3 and v4); CSS's ease-in/ease-out keywords are different curves
+  linear: 'ease-linear', 'cubic-bezier(0.4, 0, 1, 1)': 'ease-in', 'cubic-bezier(0, 0, 0.2, 1)': 'ease-out', 'cubic-bezier(0.4, 0, 0.2, 1)': 'ease-in-out',
+}
+const COLORS_T = ['color', 'background-color', 'border-color', 'outline-color', 'text-decoration-color', 'fill', 'stroke']
+const same = (a: string[], b: string[]) => a.length === b.length && a.every(x => b.includes(x))
+function transitionProperty(v: string) {
+  const t = v.trim()
+  if (t === 'none') return 'transition-none'
+  if (t === 'all') return 'transition-all'
+  const set = t.split(/\s*,\s*/).filter(p => !p.startsWith('--tw-'))
+  if (same(set, ['opacity'])) return 'transition-opacity'
+  if (same(set, ['box-shadow'])) return 'transition-shadow'
+  if (same(set, ['transform', 'translate', 'scale', 'rotate']) || same(set, ['transform'])) return 'transition-transform'
+  if (same(set, COLORS_T)) return 'transition-colors'
+  return `transition-[${set.join(',')}]`
+}
+/** Tailwind has no animation-duration utilities, so those become arbitrary properties: [animation-duration:300ms]. */
+const arbProp = (prop: string): Rule => ({
+  cls: v => `[${prop}:${v.trim().replace(/\s*,\s*/g, ',').replace(/\s+/g, '_')}]`,
+  family: (c: string) => c.startsWith(`[${prop}:`),
+})
 const re = (r: RegExp) => (c: string) => r.test(c)
 const sp = (p: string, neg = false): Rule => ({ cls: v => spacing(p, v, neg), family: re(new RegExp(`^-?${p}-`)) })
 const keyword = (map: Record<string, string>, family: RegExp): Rule => ({ cls: v => map[v.trim()] ?? null, family: re(family) })
@@ -104,6 +136,12 @@ const RULES: Record<string, Rule> = {
     family: re(/^-?rotate-/),
   },
   'box-shadow': { cls: v => (v === 'none' ? 'shadow-none' : `shadow-${arb(v)}`), family: re(/^shadow(-|$)/) },
+  'transition-property': { cls: transitionProperty, family: re(/^transition(-|$)/) },
+  'transition-duration': time('duration'), 'transition-delay': time('delay'),
+  'transition-timing-function': { cls: v => (hasList(v) ? null : EASES[normEase(v)] ?? `ease-${arb(v)}`), family: re(/^ease-/) },
+  'animation-duration': arbProp('animation-duration'), 'animation-delay': arbProp('animation-delay'),
+  'animation-timing-function': arbProp('animation-timing-function'), 'animation-iteration-count': arbProp('animation-iteration-count'),
+  'animation-direction': arbProp('animation-direction'), 'animation-fill-mode': arbProp('animation-fill-mode'),
 }
 
 const WHY: Record<string, string> = {
@@ -120,6 +158,7 @@ const TOKEN: Record<string, [prefix: string, namespace: string, hint?: string]> 
   color: ['text', 'color'], 'background-color': ['bg', 'color'], 'border-color': ['border', 'color'],
   'font-size': ['text', 'text', 'length'], 'font-weight': ['font', 'font-weight'], 'line-height': ['leading', 'leading'],
   'letter-spacing': ['tracking', 'tracking'], 'border-radius': ['rounded', 'radius'], 'box-shadow': ['shadow', 'shadow'],
+  'transition-timing-function': ['ease', 'ease'],
   ...Object.fromEntries(Object.entries(SPACE).map(([p, pre]) => [p, [pre, 'spacing']])),
 }
 function tokenClass(prop: string, name: string, ver: TwVersion) {
@@ -135,7 +174,7 @@ export function cssToTailwind(prop: string, value: string, ver: TwVersion = 4): 
   const rule = RULES[prop]
   if (!rule) return { reason: WHY[prop] ?? `no Tailwind mapping for ${prop}` }
   const v = /^var\((--[\w-]+)\)$/.exec(value.trim())
-  if (v) { const cls = tokenClass(prop, v[1], ver); return cls ? { cls } : { reason: `no token utility for ${prop}` } }
+  if (v) { const cls = tokenClass(prop, v[1], ver) ?? rule.cls(value, ver); return cls ? { cls } : { reason: `no token utility for ${prop}` } }
   const cls = rule.cls(value, ver)
   return cls ? { cls } : { reason: `can't express ${prop}: ${value} as a utility` }
 }

@@ -42,6 +42,22 @@ assert.equal(tw('border-radius', 'var(--radius-card)'), 'rounded-card')
 assert.equal(tw('padding-top', 'var(--spacing-gutter)'), 'pt-gutter')
 assert.ok(tw('display', 'var(--x)').startsWith('!'))
 
+// motion
+assert.equal(tw('transition-duration', '0.3s'), 'duration-300')
+assert.equal(tw('transition-duration', '250ms'), 'duration-250')
+assert.equal(tw('transition-duration', '250ms', 3), 'duration-[250ms]')
+assert.equal(tw('transition-delay', '150ms', 3), 'delay-150')
+assert.ok(tw('transition-duration', '0.2s, 0.4s').startsWith('!'))
+assert.equal(tw('transition-timing-function', 'cubic-bezier(0, 0, .2, 1)'), 'ease-out')
+assert.equal(tw('transition-timing-function', 'linear'), 'ease-linear')
+assert.equal(tw('transition-timing-function', 'cubic-bezier(0.2, 0, 0, 1)'), 'ease-[cubic-bezier(0.2,0,0,1)]')
+assert.equal(tw('transition-timing-function', 'var(--ease-snappy)'), 'ease-snappy')
+assert.equal(tw('transition-property', 'opacity'), 'transition-opacity')
+assert.equal(tw('transition-property', 'transform, translate, scale, rotate'), 'transition-transform')
+assert.equal(tw('transition-property', 'opacity, scale'), 'transition-[opacity,scale]')
+assert.equal(tw('animation-duration', '1.2s'), '[animation-duration:1.2s]')
+assert.equal(tw('animation-timing-function', 'var(--ease-out)'), '[animation-timing-function:var(--ease-out)]')
+
 // merging: replaces only the same family and variant
 const m = (cls: string, s: Record<string, string>, v = '') => mergeClasses(cls, s, v).className
 assert.equal(m('p-4 pt-2 text-lg text-red-500', { 'padding-top': '44px' }), 'p-4 text-lg text-red-500 pt-11')
@@ -58,6 +74,8 @@ assert.equal(m('text-lg text-(--brand)', { color: '#000' }), 'text-lg text-[#000
 assert.equal(m('text-lg text-brand-soft', { color: 'var(--color-ink)' }), 'text-lg text-ink')
 assert.equal(m('text-(length:--fs) text-red-500', { 'font-size': '16px' }), 'text-red-500 text-base')
 assert.equal(m('rounded-(--radius) p-2', { 'border-radius': '8px' }), 'p-2 rounded-lg')
+assert.equal(m('transition duration-150 ease-in delay-75', { 'transition-duration': '300ms', 'transition-timing-function': 'cubic-bezier(0, 0, 0.2, 1)' }), 'transition delay-75 duration-300 ease-out')
+assert.equal(m('animate-spin [animation-duration:2s]', { 'animation-duration': '600ms' }), 'animate-spin [animation-duration:600ms]')
 
 // stamping
 const src = `export const A = () => (\n  <div className="p-4">\n    <h3>Hi</h3>\n    <Card title="x" />\n  </div>\n)\n`

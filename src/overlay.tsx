@@ -1291,6 +1291,7 @@ function PropsSection({ el }: { el: HTMLElement }) {
 const RULE_TITLES: Record<string, string> = {
   contrast: 'Low contrast', name: 'No accessible name', alt: 'Images without alt text', label: 'Unlabelled form fields',
   target: 'Small targets', tabindex: 'Positive tabindex', 'hidden-focus': 'Focusable but hidden', heading: 'Headings', lang: 'Page language', title: 'Page title',
+  motion: 'Reduced motion',
 }
 function IssueRow({ it, pick, all }: { it: Issue; pick?: (el: HTMLElement) => void; all?: Issue[] }) {
   const n = all?.length ?? 1
@@ -1352,6 +1353,160 @@ function ChecksPanel({ rev, select }: { rev: number; select: (el: HTMLElement) =
         <button className="b sm" data-tip="Check again" onClick={() => setRes(audit())}><Icon d={P.refresh} /></button>
       </div>
     </>
+  )
+}
+
+/** Bézier curve editor: drag the two handles, or pick a preset or one of the app's --ease-* tokens. */
+function EasingEditor({ value, duration, onChange }: { value: string; duration: number; onChange: (v: string) => void }) {
+  const p = parseEase(value)
+  const X = (t: number) => 16 + t * 168, Y = (v: number) => 126 - v * 102 // room above and below for overshoot
+  const drag = (i: 0 | 1) => (e: RPointerEvent<SVGCircleElement>) => {
+    e.preventDefault()
+    const t = e.currentTarget, r = t.ownerSVGElement!.getBoundingClientRect(), start = p!
+    try { t.setPointerCapture(e.pointerId) } catch { /* pointer already released */ }
+    const move = (ev: PointerEvent) => {
+      const x = ((ev.clientX - r.left) * 200) / r.width, y = ((ev.clientY - r.top) * 150) / r.height
+      const next = [...start]
+      next[i * 2] = round(clamp01((x - 16) / 168), 2)
+      next[i * 2 + 1] = round(Math.min(1.5, Math.max(-0.5, (126 - y) / 102)), 2)
+      onChange(bezText(next))
+    }
+    const up = () => { t.removeEventListener('pointermove', move); t.removeEventListener('pointerup', up) }
+    t.addEventListener('pointermove', move); t.addEventListener('pointerup', up)
+  }
+  const cur = normEase(value)
+  const chips = [...EASE_PRESETS.map(([l, v]) => ({ l, v, on: normEase(v) === cur })), ...themeTokens().eases.map(e => ({ l: e.name === '--default-transition-timing-function' ? 'default' : e.name.replace(/^--(ease-)?/, ''), v: `var(${e.name})`, on: normEase(e.value) === cur }))]
+  return (
+    <div className="ez">
+      {p ? (
+        <svg viewBox="0 0 200 150" className="ezsvg">
+          <rect x={16} y={24} width={168} height={102} className="ezbox" />
+          <line x1={X(0)} y1={Y(0)} x2={X(1)} y2={Y(1)} className="ezref" />
+          <line x1={X(0)} y1={Y(0)} x2={X(p[0])} y2={Y(p[1])} className="ezarm" />
+          <line x1={X(1)} y1={Y(1)} x2={X(p[2])} y2={Y(p[3])} className="ezarm" />
+          <path d={`M${X(0)} ${Y(0)}C${X(p[0])} ${Y(p[1])} ${X(p[2])} ${Y(p[3])} ${X(1)} ${Y(1)}`} className="ezcurve" />
+          <circle cx={X(p[0])} cy={Y(p[1])} r={5} className="ezh" onPointerDown={drag(0)} />
+          <circle cx={X(p[2])} cy={Y(p[3])} r={5} className="ezh" onPointerDown={drag(1)} />
+        </svg>
+      ) : <p className="stnote">{value} isn’t a curve that can be drawn. Pick one below to replace it.</p>}
+      <div className="ezchips">{chips.map(c => <button key={c.l + c.v} className={'ezchip' + (c.on ? ' on' : '')} onClick={() => onChange(c.v)}>{c.l}</button>)}</div>
+      <div className="eztrack" data-tip="Preview"><i className="ezdot" style={{ '--ez': value, '--ezd': `${Math.min(2000, Math.max(200, duration))}ms` } as CSSProperties} /></div>
+      <Field mono value={value} onChange={onChange} />
+    </div>
+  )
+}
+function KeyframeList({ el, name }: { el: HTMLElement; name: string }) {
+  const r = keyframesRule(el.ownerDocument, name)
+  if (!r) return null
+  return <div className="kf">{[...r.cssRules].map((k, i) => <div key={i}><b>{(k as CSSKeyframeRule).keyText}</b><span>{(k as CSSKeyframeRule).style.cssText}</span></div>)}</div>
+}
+function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement | null) => void }) {
+  const cs = getComputedStyle(el)
+  const set = (p: string) => (v: string) => editStyle(el, p, v)
+  const durs = splitList(cs.transitionDuration).map(toMs), props = splitList(cs.transitionProperty)
+  const moves = durs.some(d => d > 0)
+  const names = splitList(cs.animationName).filter(n => n !== 'none')
+  // one value per running animation; CSS repeats shorter lists, so expand before editing one entry
+  const setAt = (p: string, i: number) => (v: string) => editStyle(el, p, names.map((_, j) => (j === i ? v : at(cs.getPropertyValue(p), j))).join(', '))
+  const issues = motionIssues(el)
+  return (
+    <>
+      <Crumbs el={el} select={select} />
+      {issues.length > 0 && <Section title="Motion checks" n={issues.length}>{issues.map((it, i) => <IssueRow key={i} it={it} />)}</Section>}
+      <Section title="Transition">
+        {!moves && <p className="empty">No transition yet. Give it a duration and state changes (hover, focus, press) animate.</p>}
+        <Row label="Property"><Field mono value={cs.transitionProperty} onChange={set('transition-property')} placeholder="opacity, scale" /></Row>
+        <Row label="Duration"><Num suffix="ms" value={durs[0] ?? 0} unit="ms" step={10} onChange={set('transition-duration')} /></Row>
+        <Row label="Delay"><Num suffix="ms" value={toMs(at(cs.transitionDelay, 0))} unit="ms" step={10} onChange={set('transition-delay')} /></Row>
+        {durs.length > 1 && <p className="stnote">These apply to all {props.length} transitioned properties.</p>}
+        <Lbl>Easing</Lbl>
+        <EasingEditor value={at(cs.transitionTimingFunction, 0) || 'ease'} duration={durs[0] || 300} onChange={set('transition-timing-function')} />
+        <Lbl>Play</Lbl>
+        <div className="playrow">{STATES.map(st => <button key={st} className="b sm" disabled={!moves} onClick={() => playState(el, st)}><Icon d={P.play} size={11} />{st[0].toUpperCase() + st.slice(1)}</button>)}</div>
+      </Section>
+      {names.map((n, i) => (
+        <Section key={n + i} title={`@keyframes ${n}`}>
+          <Row label="Duration"><Num suffix="ms" value={toMs(at(cs.animationDuration, i))} unit="ms" step={10} onChange={setAt('animation-duration', i)} /></Row>
+          <Row label="Delay"><Num suffix="ms" value={toMs(at(cs.animationDelay, i))} unit="ms" step={10} onChange={setAt('animation-delay', i)} /></Row>
+          <Row label="Repeat"><Field mono value={at(cs.animationIterationCount, i)} onChange={setAt('animation-iteration-count', i)} placeholder="1 or infinite" /></Row>
+          <Row label="Direction"><Pick value={at(cs.animationDirection, i)} options={['normal', 'reverse', 'alternate', 'alternate-reverse']} onChange={setAt('animation-direction', i)} /></Row>
+          <Row label="Fill"><Pick value={at(cs.animationFillMode, i)} options={['none', 'forwards', 'backwards', 'both']} onChange={setAt('animation-fill-mode', i)} /></Row>
+          <Lbl>Easing</Lbl>
+          <EasingEditor value={at(cs.animationTimingFunction, i)} duration={toMs(at(cs.animationDuration, i))} onChange={setAt('animation-timing-function', i)} />
+          <Lbl>Keyframes</Lbl>
+          <KeyframeList el={el} name={n} />
+          <button className="wide" onClick={() => replayKeyframes(el)}><Icon d={P.replay} />Replay</button>
+        </Section>
+      ))}
+      <p className="stnote">Press <kbd>M</kbd> for the timeline: it catches animations as they run, and replays them at 25% or 10% speed.</p>
+    </>
+  )
+}
+/** Bottom drawer: every animation on the page as it runs, grouped by interaction; replay and slow motion. */
+function Timeline({ area, pick }: { area: { l: number; t: number; w: number; h: number }; pick: (el: HTMLElement) => void }) {
+  const [, tick] = useState(0)
+  const [speed, setSpeedState] = useState(String(rec.rate) as '1' | '0.25' | '0.1')
+  const [chosen, setChosen] = useState<number | null>(null) // a past group; null follows the latest
+  const [paused, setPaused] = useState(false)
+  useEffect(() => {
+    let id = 0, n = -1
+    const loop = () => {
+      capture()
+      if (rec.list.length !== n || rec.list.some(x => x.a.playState === 'running')) { n = rec.list.length; tick(v => v + 1) }
+      id = requestAnimationFrame(loop)
+    }
+    id = requestAnimationFrame(loop)
+    return () => { cancelAnimationFrame(id); setSpeed(1) } // closing the timeline puts the page back at full speed
+  }, [])
+  const gs = groupsOf(rec.list), gi = chosen ?? gs.length - 1, g = gs[gi] ?? [], g0 = g[0]?.t0 ?? 0
+  const rows = g.map(x => {
+    const t = x.a.effect?.getComputedTiming(), r = Math.abs(x.a.playbackRate) || 1
+    const delay = (Number(t?.delay) || 0) / r, active = Number(t?.activeDuration) / r
+    const off = x.t0 - g0
+    return { x, off, delay, active, local: x.a.playState === 'running' ? off + (Number(x.a.currentTime) || 0) / r : null }
+  })
+  const finite = rows.filter(r => Number.isFinite(r.active)).map(r => r.off + r.delay + r.active)
+  const span = Math.max(300, ...finite, ...rows.filter(r => !Number.isFinite(r.active)).map(r => r.off + r.delay + 1200))
+  const pct = (ms: number) => `${(Math.min(span, ms) / span) * 100}%`
+  const room = Math.max(2, Math.floor((area.w - (area.w < 560 ? area.w * 0.4 + 64 : 290)) / 64)) // labels need ~64px each
+  const step = [50, 100, 250, 500, 1000, 2000, 5000, 10000].find(s => span / s <= room) ?? 20000
+  const ticks = Array.from({ length: Math.floor(span / step) + 1 }, (_, i) => i * step)
+  const shown = gs.slice(-10), first = gs.length - shown.length
+  const H = 200
+  const pauseAll = () => {
+    for (const a of document.getAnimations()) { const t = (a.effect as KeyframeEffect | null)?.target; if (t && t.getRootNode() === document) { if (paused) a.play(); else a.pause() } }
+    setPaused(!paused)
+  }
+  return (
+    <div className="tl" style={{ left: area.l, top: area.t + area.h - H, width: area.w, height: H }}>
+      <div className="tlh">
+        <Icon d={P.timer} size={14} /><b>Timeline</b>
+        <div className="tlgroups">
+          {shown.map((x, i) => <button key={first + i} className={'tlg' + (first + i === gi ? ' on' : '')} data-tip={`${x.length} animation${x.length === 1 ? '' : 's'}`} onClick={() => setChosen(first + i === gs.length - 1 ? null : first + i)}>{x.length}</button>)}
+        </div>
+        <span className="sp" />
+        <Icon d={P.slow} size={14} />
+        <Seg value={speed} options={[['1', '100%'], ['0.25', '25%'], ['0.1', '10%']] as const} onChange={v => { setSpeed(+v); setSpeedState(v) }} />
+        <button className="b sm" data-tip={paused ? 'Resume all' : 'Pause all'} onClick={pauseAll}><Icon d={paused ? P.play : P.pause} /></button>
+        <button className="b sm" data-tip="Replay" disabled={!g.length} onClick={() => { replayGroup(g); tick(v => v + 1) }}><Icon d={P.replay} /></button>
+        <button className="b sm" data-tip="Clear" disabled={!rec.list.length} onClick={() => { rec.list.length = 0; setChosen(null); tick(v => v + 1) }}><Icon d={P.trash} /></button>
+      </div>
+      {!g.length ? <p className="empty pad">Hover, click or scroll the page (or press Play in the Animate tab). Animations show up here as they run.</p> : (
+        <div className="tlbody">
+          <div className="tlrow tlaxis"><span /><div className="tltrack">{ticks.map(t => <span key={t} style={{ left: pct(t) }}>{fmtMs(t)}</span>)}</div><span /></div>
+          {rows.map(({ x, off, delay, active, local }, i) => (
+            <div key={i} className="tlrow" role="button" onClick={() => pick(x.el)}>
+              <span className="tln" title={`${label(x.el)} · ${x.name}`}><b>{label(x.el)}</b> {x.name}</span>
+              <div className="tltrack">
+                <i className={'tlbar ' + x.kind + (Number.isFinite(active) ? '' : ' inf')} style={{ left: pct(off + delay), width: Number.isFinite(active) ? `max(2px, ${pct(active)})` : `calc(100% - ${pct(off + delay)})` }} />
+                {local != null && <i className="tlhead" style={{ left: pct(local) }} />}
+              </div>
+              <span className="tld">{Number.isFinite(active) ? fmtMs(active) : '∞'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -1478,12 +1633,6 @@ function PrototypeTab({ el, select }: { el: HTMLElement; select: (el: HTMLElemen
         </>}
         {tag === 'button' && <Row label="Type"><Pick value={attr('type') || 'submit'} options={['submit', 'button', 'reset']} onChange={setA('type')} /></Row>}
       </Section>
-      <Section title="Transition">
-        <Row label="Property"><Field mono value={cs.transitionProperty} onChange={set('transition-property')} /></Row>
-        <Row label="Duration"><Num suffix="ms" value={round(parseFloat(cs.transitionDuration) * 1000)} unit="ms" step={10} onChange={set('transition-duration')} /></Row>
-        <Row label="Delay"><Num suffix="ms" value={round(parseFloat(cs.transitionDelay) * 1000)} unit="ms" step={10} onChange={set('transition-delay')} /></Row>
-        <Row label="Easing"><Pick value={cs.transitionTimingFunction} options={['ease', 'linear', 'ease-in', 'ease-out', 'ease-in-out']} onChange={set('transition-timing-function')} /></Row>
-      </Section>
       <Section title="Accessibility">
         <Row label="Role"><Field value={attr('role')} onChange={setA('role')} placeholder="implicit" /></Row>
         <Row label="Label"><Field value={attr('aria-label')} onChange={setA('aria-label')} placeholder="aria-label" /></Row>
@@ -1567,7 +1716,7 @@ const KEYS: [string, string][] = [
   ['Zoom', 'Ctrl + scroll'], ['Fit / 100%', '⇧1 / Ctrl 0'],
   ['Parent / child', '⇧↵ / ↵'], ['Deep select', 'Ctrl click'], ['Nudge', '← ↑ → ↓'], ['Hide element', 'Del'], ['Undo / redo', 'Ctrl Z / Ctrl ⇧Z'],
   ['Anatomy', 'hold ⇧ · A to lock'], ['Canvas mode', '⇧C'], ['Responsive preview', '⇧V'], ['X-ray', 'X'], ['Duplicate', 'Ctrl D · Alt drag'], ['Copy / paste', 'Ctrl C / V'], ['Forward / back', '] / ['],
-  ['Rulers', '⇧R'],
+  ['Rulers', '⇧R'], ['Animation timeline', 'M'],
 ]
 const Help = () => (
   <div className="help">
@@ -1581,9 +1730,11 @@ type InspectorProps = {
   guide: Guide | null; updateGuide: (p: Partial<Guide>) => void; removeGuide: () => void
   theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void; onClose: () => void; onCode: () => void
 }
+let showInspectorTab: (t: 'design' | 'prototype' | 'animate') => void = () => {}
 const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide, removeGuide, theme, setTheme, onClose, onCode }: InspectorProps) {
   void rev // re-render trigger only
-  const [tab, setTab] = useState<'design' | 'prototype'>('design')
+  const [tab, setTab] = useState<'design' | 'prototype' | 'animate'>('design')
+  showInspectorTab = setTab
   const [menu, setMenu] = useState(false)
   const [copied, setCopied] = useState(false)
   const n = [...liveEdits().values()].reduce((s, p) => s + p.size, 0)
@@ -1597,12 +1748,13 @@ const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide,
         <button className="b xs" data-tip="Close panel" onClick={onClose}><Icon d={P.x} size={15} /></button>
       </div>
       {menu && <Settings theme={theme} setTheme={setTheme} onClose={() => setMenu(false)} />}
-      <div className="tabbar"><Seg big value={tab} options={[['design', 'Design'], ['prototype', 'Prototype']] as const} onChange={setTab} /></div>
+      <div className="tabbar"><Seg big value={tab} options={[['design', 'Design'], ['prototype', 'Prototype'], ['animate', 'Animate']] as const} onChange={setTab} /></div>
       <div className="pb">
         {guide ? <GuidePanel g={guide} update={updateGuide} remove={removeGuide} />
           : !el ? <Help />
           : tab === 'design' ? <DesignTab el={el} select={select} />
-          : <PrototypeTab el={el} select={select} />}
+          : tab === 'prototype' ? <PrototypeTab el={el} select={select} />
+          : <AnimateTab el={el} select={select} />}
       </div>
       {!guide && (
         <div className="foot">
@@ -1738,8 +1890,122 @@ function rootVars() {
   return out
 }
 
+// ── motion: transitions, keyframes, easing, and a recorder for the timeline ──
+/** Split a CSS list on top-level commas (cubic-bezier(…) has commas of its own). */
+function splitList(v: string) {
+  const out: string[] = []
+  let depth = 0, cur = ''
+  for (const ch of v) {
+    if (ch === '(') depth++; else if (ch === ')') depth--
+    if (ch === ',' && !depth) { out.push(cur.trim()); cur = '' } else cur += ch
+  }
+  if (cur.trim()) out.push(cur.trim())
+  return out
+}
+const toMs = (v: string) => (v.trim().endsWith('ms') ? parseFloat(v) : parseFloat(v) * 1000) || 0
+const fmtMs = (n: number) => (n >= 1000 ? `${round(n / 1000, 2)}s` : `${Math.round(n)}ms`)
+const at = (list: string, i: number) => { const l = splitList(list); return l[i % l.length] ?? '' } // CSS repeats a short list
+type Bez = [number, number, number, number]
+const KEYWORD_EASE: Record<string, Bez> = { ease: [0.25, 0.1, 0.25, 1], 'ease-in': [0.42, 0, 1, 1], 'ease-out': [0, 0, 0.58, 1], 'ease-in-out': [0.42, 0, 0.58, 1], linear: [0, 0, 1, 1] }
+function parseEase(v: string): Bez | null {
+  const t = v.trim()
+  if (KEYWORD_EASE[t]) return KEYWORD_EASE[t]
+  const n = /^cubic-bezier\(([^)]+)\)$/.exec(t)?.[1].split(',').map(Number)
+  return n?.length === 4 && n.every(Number.isFinite) ? (n as Bez) : null
+}
+const bezText = (p: number[]) => `cubic-bezier(${p.map(n => round(n, 2)).join(', ')})`
+const normEase = (v: string) => { const p = parseEase(v); return p ? bezText(p) : v.trim() }
+const isEaseIn = (v: string) => { const p = parseEase(v); return !!p && p[0] >= 0.3 && p[1] <= 0.1 && p[2] >= 0.9 && p[3] >= 0.9 }
+// ease-out family first: interactions should respond at once and settle (cubic-bezier(0.2, 0, 0, 1) is the snappy one)
+const EASE_PRESETS: [string, string][] = [
+  ['Ease out', 'cubic-bezier(0, 0, 0.2, 1)'], ['Snappy', 'cubic-bezier(0.2, 0, 0, 1)'], ['In-out', 'cubic-bezier(0.4, 0, 0.2, 1)'], ['Linear', 'linear'], ['Ease in', 'cubic-bezier(0.4, 0, 1, 1)'],
+]
+function keyframesRule(doc: Document, name: string): CSSKeyframesRule | null {
+  const walk = (rules: CSSRuleList): CSSKeyframesRule | null => {
+    for (const r of rules) {
+      if ('appendRule' in r && (r as CSSKeyframesRule).name === name) return r as CSSKeyframesRule
+      const kids = (r as CSSGroupingRule).cssRules
+      if (kids && !('keyText' in r)) { const f = walk(kids); if (f) return f }
+    }
+    return null
+  }
+  for (const sh of doc.styleSheets) { try { const f = walk(sh.cssRules); if (f) return f } catch { /* cross-origin sheet */ } }
+  return null
+}
+/** Play a state's transition: back to rest, into the state, hold, then back to whatever was showing. */
+function playState(el: HTMLElement, st: State) {
+  const was = forced.get(el) ?? null, cs = getComputedStyle(el)
+  const total = Math.max(0, ...splitList(cs.transitionDuration).map((d, i) => toMs(d) + toMs(at(cs.transitionDelay, i))))
+  forceState(el, null)
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    forceState(el, st)
+    setTimeout(() => forceState(el, was), (total + 450) / rec.rate)
+  }))
+}
+/** Restart an element's keyframe animations (a finished one isn't in getAnimations() any more). */
+function replayKeyframes(el: HTMLElement) {
+  const v = el.style.getPropertyValue('animation-name'), pri = el.style.getPropertyPriority('animation-name')
+  el.style.setProperty('animation-name', 'none', 'important')
+  void el.offsetWidth
+  if (v) el.style.setProperty('animation-name', v, pri); else el.style.removeProperty('animation-name')
+  setTimeout(() => { for (const a of el.getAnimations()) if (rec.rate !== 1) a.updatePlaybackRate(rec.rate) })
+}
+/** Motion that tends to feel wrong: what the make-interfaces-feel-better rules flag. */
+function motionIssues(el: HTMLElement): Issue[] {
+  const cs = getComputedStyle(el), out: Issue[] = []
+  const add = (rule: string, msg: string, fix?: Issue['fix']) => out.push({ el, sev: 'warn', rule, msg, fix })
+  const durs = splitList(cs.transitionDuration).map(toMs), moves = durs.some(d => d > 0)
+  if (moves && splitList(cs.transitionProperty).includes('all'))
+    add('motion-all', 'transition: all also animates layout and colours you didn’t mean to, and costs more. List the properties that should move.')
+  if (moves && splitList(cs.transitionTimingFunction).some(isEaseIn)) {
+    const tok = themeTokens().eases.find(e => e.name === '--ease-out')
+    add('motion-ease', 'ease-in starts slowly, so the response feels late. Use ease-out for state changes.', { label: tok ? tok.name : 'ease-out', run: () => editStyle(el, 'transition-timing-function', tok ? `var(${tok.name})` : 'cubic-bezier(0, 0, 0.2, 1)') })
+  }
+  const max = Math.max(0, ...durs)
+  if (max > 400) add('motion-slow', `A ${fmtMs(max)} transition feels sluggish for hover and press feedback. 150–300ms reads as responsive.`, { label: '200ms', run: () => editStyle(el, 'transition-duration', '200ms') })
+  if (cs.willChange !== 'auto' && splitList(cs.willChange).some(p => !/^(transform|translate|scale|rotate|opacity|filter|scroll-position|contents)$/.test(p)))
+    add('motion-will-change', `will-change: ${cs.willChange} reserves memory for properties the GPU can’t composite. Keep it to transform, opacity or filter, and only where the first frame stutters.`)
+  return out
+}
+
+type Rec = { a: Animation; el: HTMLElement; kind: 'transition' | 'keyframes' | 'script'; name: string; t0: number }
+const rec = { list: [] as Rec[], seen: new WeakSet<Animation>(), rate: 1 }
+/** Pick up animations that just started. Events catch CSS ones; polling (while the timeline is open) catches el.animate(). */
+function capture() {
+  for (const a of document.getAnimations()) {
+    if (rec.seen.has(a)) continue
+    rec.seen.add(a)
+    const el = (a.effect as KeyframeEffect | null)?.target as HTMLElement | null
+    if (!el || el.getRootNode() !== document) continue // Watcher's own UI lives in a shadow root
+    const kind = 'transitionProperty' in a ? 'transition' : 'animationName' in a ? 'keyframes' : 'script'
+    const name = (a as CSSTransition).transitionProperty ?? (a as CSSAnimation).animationName ?? (a.id || 'animate()')
+    if (rec.rate !== 1) a.updatePlaybackRate(rec.rate)
+    rec.list.push({ a, el, kind, name, t0: performance.now() })
+    if (rec.list.length > 120) rec.list.shift()
+  }
+}
+function setSpeed(r: number) {
+  rec.rate = r
+  for (const x of rec.list) { try { x.a.updatePlaybackRate(r) } catch { /* animation gone */ } }
+}
+/** Animations that started within 300ms of each other belong to one interaction. */
+function groupsOf(list: Rec[]) {
+  const gs: Rec[][] = []
+  for (const x of list) { const g = gs.at(-1); if (g && x.t0 - g.at(-1)!.t0 < 300) g.push(x); else gs.push([x]) }
+  return gs
+}
+/** Replay a group with its original offsets (staggers stay staggered), at the current speed. */
+function replayGroup(g: Rec[]) {
+  const g0 = g[0].t0, now = performance.now()
+  for (const x of g) {
+    const off = x.t0 - g0
+    x.t0 = now + off / rec.rate
+    setTimeout(() => { try { x.a.updatePlaybackRate(rec.rate); x.a.currentTime = 0; x.a.play() } catch { /* animation gone */ } }, off / rec.rate)
+  }
+}
+
 // ── checks: design-token guardrails + accessibility ─────────────────────────
-type Tokens = { colors: Token[]; sizes: Token[]; radii: Token[]; spaces: Token[]; step?: number }
+type Tokens = { colors: Token[]; sizes: Token[]; radii: Token[]; spaces: Token[]; eases: { name: string; value: string }[]; step?: number }
 type Issue = { el: HTMLElement | null; sev: 'error' | 'warn'; rule: string; msg: string; key?: string; fix?: { label: string; run: () => void } }
 const rgbOf = (c: string): RGB => { const { r, g, b, a } = rgba(c); return { r, g, b, a } }
 let tokCache: (Tokens & { at: number }) | null = null
@@ -1747,7 +2013,7 @@ let tokCache: (Tokens & { at: number }) | null = null
 function themeTokens(): Tokens {
   if (tokCache && performance.now() - tokCache.at < 3000) return tokCache
   const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
-  const t: Tokens = { colors: [], sizes: [], radii: [], spaces: [] }
+  const t: Tokens = { colors: [], sizes: [], radii: [], spaces: [], eases: [] }
   for (const [name, v] of rootVars()) {
     if (name.startsWith('--tw-')) continue
     const len = /^(-?\d*\.?\d+)(px|rem)$/.exec(v)
@@ -1757,7 +2023,8 @@ function themeTokens(): Tokens {
       else if (/^--(text|font-size)/.test(name)) t.sizes.push({ name, px })
       else if (/radius|rounded/.test(name)) t.radii.push({ name, px })
       else if (/^--(spacing|space|gap)/.test(name)) t.spaces.push({ name, px })
-    } else if (!/^[\d.\s%-]*$/.test(v) && !/^(inherit|initial|unset|currentcolor|transparent)$/i.test(v) && CSS.supports('color', v)) t.colors.push({ name, rgb: rgbOf(v) })
+    } else if (/^(cubic-bezier|steps|linear)\(/.test(v) || (name.startsWith('--ease') && /^(ease|linear)/.test(v))) t.eases.push({ name, value: v })
+    else if (!/^[\d.\s%-]*$/.test(v) && !/^(inherit|initial|unset|currentcolor|transparent)$/i.test(v) && CSS.supports('color', v)) t.colors.push({ name, rgb: rgbOf(v) })
   }
   // namespaced theme tokens first: they become named utilities (text-brand) when written back
   for (const list of [t.colors, t.sizes, t.radii]) list.sort((a, b) => +/^--(color|text|radius)-/.test(b.name) - +/^--(color|text|radius)-/.test(a.name))
@@ -1768,6 +2035,7 @@ function themeTokens(): Tokens {
 function tokenRef(prop: string, v: string): string | null {
   if (v.startsWith('var(')) return null
   const T = themeTokens()
+  if (prop.endsWith('timing-function')) { const n = normEase(v), e = T.eases.find(e => normEase(e.value) === n); return e ? `var(${e.name})` : null }
   if (/color$/.test(prop)) { if (!CSS.supports('color', v)) return null; const n = nearestColor(rgbOf(v), T.colors); return n?.exact ? `var(${n.token.name})` : null }
   const px = /^(-?\d*\.?\d+)px$/.exec(v)?.[1]
   const list = prop === 'font-size' ? T.sizes : prop === 'border-radius' ? T.radii : null
@@ -1894,10 +2162,14 @@ function tokenIssues(el: HTMLElement): Issue[] {
 function audit() {
   tokCache = null
   const a11y = pageIssues(), tokens: Issue[] = []
+  let moving = false
   for (const el of document.body.querySelectorAll<HTMLElement>('*')) {
     if (SKIP.has(el.tagName) || !(el.checkVisibility?.() ?? true)) continue
     a11y.push(...a11yIssues(el)); tokens.push(...tokenIssues(el))
+    moving ||= getComputedStyle(el).animationName !== 'none'
   }
+  const respects = [...document.styleSheets].some(sh => { try { return [...sh.cssRules].some(r => r.cssText.includes('prefers-reduced-motion')) } catch { return false } })
+  if (moving && !respects) a11y.push({ el: null, sev: 'warn', rule: 'motion', msg: 'Keyframe animations run, but no CSS honours prefers-reduced-motion. Use motion-safe: (Tailwind) or a reduced-motion media query.' })
   return { a11y, tokens }
 }
 
@@ -2634,6 +2906,7 @@ function Overlay() {
   const [dragging, setDragging] = useState<number | null>(null)
   const [show, setShow] = useState({ rulers: true, layers: true, inspector: true })
   const [right, setRight] = useState<'inspect' | 'ds' | 'perf' | 'code' | 'checks'>('inspect')
+  const [timeline, setTimeline] = useState(false)
   const [grid, setGrid] = useState(false)
   const [filter, setFilter] = useState('')
   const [settings, setSettings] = useState(false)
@@ -2977,6 +3250,7 @@ function Overlay() {
       else if (lk === 'i' && !e.shiftKey) eyedrop()
       else if (k === 'P' && e.shiftKey) setTool('draw')
       else if (lk === 'x' && !e.shiftKey) setXray(v => !v)
+      else if (lk === 'm' && !e.shiftKey && !FRAME) setTimeline(v => !v)
       else if (lk === 'a' && !e.shiftKey) setAnatLock(v => !v)
       else if (!e.shiftKey && TOOL_KEYS[k]) setTool(TOOL_KEYS[k])
       else if (k === 'R' && e.shiftKey) setShow(v => ({ ...v, rulers: !v.rulers }))
@@ -3033,6 +3307,13 @@ function Overlay() {
   }
   const close = () => { if (!cv.on || leaveCanvas()) { saveNow(); clearForced(); setOpen(false) } }
   L.toggleCanvas = toggleCanvas
+  // record CSS animations and transitions as they start, so the timeline can show what just happened
+  useEffect(() => {
+    if (!open || FRAME) return
+    const on = () => capture()
+    document.addEventListener('transitionrun', on, true); document.addEventListener('animationstart', on, true)
+    return () => { document.removeEventListener('transitionrun', on, true); document.removeEventListener('animationstart', on, true) }
+  }, [open])
   const saveNow = () => { if (!FRAME && prefs.persist && restoredPages.has(pageKey())) writePage(capturePage(L.guides)) }
   // restore this page's saved session once per load (after the app has had a moment to render)
   useEffect(() => {
@@ -3345,6 +3626,7 @@ function Overlay() {
         {!covered && <div className="ablabel" style={{ left: ab.x, top: ab.y }}>{host}{location.pathname}</div>}
         {editing && <SvgEditor area={area} />}
         {resp && !editing && <Responsive area={area} value={resp} onChange={setResp} href={href} inspect={frameInspect} onInspect={setFrameInspect} />}
+        {timeline && !editing && <Timeline area={area} pick={el => { select(el); setRight('inspect'); setShow(v => ({ ...v, inspector: true })); showInspectorTab('animate') }} />}
 
         {stage}
 
@@ -3421,6 +3703,7 @@ function Overlay() {
         <button className={'b' + (grid ? ' tg' : '')} data-tip="Pixel grid · ⇧G" onClick={() => setGrid(v => !v)}><Icon d={P.grid} /></button>
         <i className="sep" />
         <button className={'b' + (xray ? ' on' : '')} data-tip="X-ray · X" onClick={() => setXray(v => !v)}><Icon d={P.xray} /></button>
+        <button className={'b' + (timeline ? ' on' : '')} data-tip="Timeline · M" onClick={() => setTimeline(v => !v)}><Icon d={P.timer} /></button>
         <button className={'b' + (right === 'ds' ? ' tg' : '')} data-tip="Design system" onClick={() => { setRight(r => (r === 'ds' ? 'inspect' : 'ds')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.palette} /></button>
         <button className={'b' + (right === 'perf' ? ' tg' : '')} data-tip="Profiler" onClick={() => { setRight(r => (r === 'perf' ? 'inspect' : 'perf')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.pulse} /></button>
         <button className={'b' + (right === 'checks' ? ' tg' : '')} data-tip="Checks: tokens & accessibility" onClick={() => { setRight(r => (r === 'checks' ? 'inspect' : 'checks')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.shield} /></button>
@@ -3613,6 +3896,62 @@ const CSS_TEXT = `
 .launch { all: unset; position: absolute; right: 16px; bottom: 16px; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--surface); color: var(--text); box-shadow: var(--shadow-raised); cursor: pointer; }
 .launch:hover { box-shadow: var(--shadow-raised), 0 0 0 2px var(--primary); }
 .stbar { margin: 2px 0 10px; }
+.ez { display: grid; gap: 8px; margin-bottom: 4px; }
+.ezsvg { display: block; width: 100%; height: auto; border-radius: 8px; background: var(--input); box-shadow: var(--shadow-inset-field); touch-action: none; }
+.ezbox { fill: none; stroke: var(--border-soft); }
+.ezref { stroke: var(--border-strong); stroke-dasharray: 3 3; }
+.ezarm { stroke: var(--text-x); }
+.ezcurve { fill: none; stroke: var(--primary); stroke-width: 2; stroke-linecap: round; }
+.ezh { fill: var(--surface); stroke: var(--primary); stroke-width: 1.5; cursor: grab; transition: r .12s cubic-bezier(0.2, 0, 0, 1); }
+.ezh:hover, .ezh:active { r: 6.5px; }
+.ezchips { display: flex; flex-wrap: wrap; gap: 4px; }
+.ezchip { all: unset; height: 22px; padding: 0 8px; border-radius: 6px; font-size: 11px; line-height: 22px; color: var(--text-muted); box-shadow: inset 0 0 0 1px var(--border); cursor: pointer; transition: background-color .12s, color .12s, box-shadow .12s; }
+.ezchip:hover { background: var(--bg-hover); color: var(--text); }
+.ezchip.on { color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+.eztrack { position: relative; height: 18px; border-radius: 9px; background: var(--input); box-shadow: var(--shadow-inset-field); container-type: inline-size; }
+.ezdot { position: absolute; left: 3px; top: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--primary); animation: ezgo var(--ezd, 600ms) var(--ez, ease) infinite alternate; }
+@keyframes ezgo { to { translate: calc(100cqw - 18px) 0; } }
+@media (prefers-reduced-motion: reduce) { .ezdot { animation: none; } }
+.playrow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.playrow .b { box-shadow: inset 0 0 0 1px var(--border); font-size: 11.5px; gap: 5px; transition: scale .12s cubic-bezier(0.2, 0, 0, 1), background-color .12s; }
+.playrow .b:active:not(:disabled) { scale: 0.96; }
+.playrow .b:disabled { opacity: .45; cursor: default; }
+.kf { display: grid; gap: 3px; margin: 2px 0 8px; font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); }
+.kf div { display: flex; gap: 8px; min-width: 0; }
+.kf b { flex: none; min-width: 36px; color: var(--text); font-weight: 500; }
+.kf span { overflow-wrap: anywhere; }
+.tl { position: absolute; display: flex; flex-direction: column; container-type: inline-size; pointer-events: auto; cursor: default; background: var(--surface); box-shadow: 0 -1px 0 var(--border), 0 -8px 24px oklch(0% 0 0 / .06); font-variant-numeric: tabular-nums; animation: tlin .2s cubic-bezier(0.2, 0, 0, 1) both; }
+@keyframes tlin { from { opacity: 0; translate: 0 8px; } }
+@media (prefers-reduced-motion: reduce) { .tl { animation: none; } }
+.tlh { flex: none; display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--border-soft); color: var(--text-muted); }
+.tlh b { color: var(--text); font-weight: 600; }
+.tlh .seg { flex: none; width: 168px; }
+.tlgroups { display: flex; gap: 3px; margin-left: 8px; overflow: hidden; }
+.tlg { all: unset; box-sizing: border-box; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 6px; font-size: 10.5px; line-height: 20px; text-align: center; color: var(--text-muted); box-shadow: inset 0 0 0 1px var(--border); cursor: pointer; transition: background-color .12s, color .12s; }
+.tlg:hover { background: var(--bg-hover); color: var(--text); }
+.tlg.on { background: var(--primary); color: var(--on-primary); box-shadow: none; }
+.tlbody { flex: 1; overflow: auto; padding: 0 12px 8px; }
+.tlrow { display: grid; grid-template-columns: 200px minmax(0, 1fr) 52px; align-items: center; gap: 10px; height: 24px; padding: 0 4px; border-radius: 6px; }
+.tlrow[role=button] { cursor: pointer; }
+.tlrow[role=button]:hover { background: var(--bg-hover); }
+.tlaxis { position: sticky; top: 0; z-index: 1; height: 24px; background: var(--surface); }
+.tlaxis .tltrack span { position: absolute; top: 4px; padding-left: 3px; border-left: 1px solid var(--border); font-size: 10px; line-height: 14px; color: var(--text-x); white-space: nowrap; }
+.tln { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
+.tln b { color: var(--text); font-weight: 600; }
+.tltrack { position: relative; height: 10px; }
+.tlbar { position: absolute; top: 0; height: 10px; border-radius: 3px; background: var(--primary); }
+.tlbar.keyframes { background: oklch(62% .19 300); }
+.tlbar.script { background: oklch(64% .13 190); }
+.tlbar.inf { mask-image: linear-gradient(90deg, #000 75%, transparent); }
+.tlhead { position: absolute; top: -3px; width: 2px; height: 16px; margin-left: -1px; border-radius: 1px; background: var(--text); }
+.tld { font-size: 10.5px; color: var(--text-x); text-align: right; }
+.tlh { overflow: hidden; }
+@container (max-width: 560px) {
+  .tlh > svg:first-child, .tlh > b, .tlgroups, .tlh > svg:nth-of-type(2) { display: none; }
+  .tlh { gap: 4px; padding-left: 8px; }
+  .tlh .seg { width: 120px; }
+  .tlrow { grid-template-columns: 40% minmax(0, 1fr) 40px; gap: 6px; }
+}
 .ck { display: flex; align-items: center; gap: 7px; padding: 5px 0; font-size: 11.5px; line-height: 1.35; color: var(--text-muted); }
 .ck + .ck { border-top: 1px solid var(--border-soft); }
 .ck > svg { flex: none; }

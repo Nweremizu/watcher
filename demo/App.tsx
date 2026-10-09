@@ -20,6 +20,7 @@ function Navbar() {
 function Hero() {
   return (
     <header className="hero">
+      <span className="mb-4 inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-sm text-[#555] shadow-[0_0_0_1px_#eee]"><i className="size-2 rounded-full bg-[#22c55e] animate-pulse" />All systems normal</span>
       <h1>Ship faster at the edge</h1>
       <p>Deploy serverless code to 300 cities in seconds. No cold starts, no config.</p>
       <div className="row"><button className="btn">Get started</button><button className="btn ghost">Read docs</button></div>

@@ -13,7 +13,7 @@ Rulers and guides, live style editing, a free canvas, an SVG editor, design-syst
 - [Keyboard shortcut](#keyboard-shortcut): changing the key, and how to write any key
 - [Options](#options)
 - [Write edits back to your code](#write-edits-back-to-your-code-tailwind)
-- [Component props](#component-props) · [Forced states](#forced-states) · [Checks: tokens & accessibility](#checks-tokens--accessibility) · [Sessions](#sessions)
+- [Component props](#component-props) · [Forced states](#forced-states) · [Animation](#animation) · [Checks: tokens & accessibility](#checks-tokens--accessibility) · [Sessions](#sessions)
 - [What it costs your app](#what-it-costs-your-app) · [Features](#features)
 
 ## Getting started
@@ -211,6 +211,41 @@ Live editing uses React's DevTools hook, which the Vite plugin installs before R
 
 The **Default · Hover · Focus · Active** bar at the top of the inspector shows the selected element in that state. This works with your real CSS, including Tailwind `hover:` and `group-hover:`, because Watcher mirrors each rule that uses a state onto an attribute it can toggle. Hover and active also apply to ancestors, and focus gives ancestors `focus-within`, just as a real pointer would. While a state is showing, inspector edits apply only to that state and are written as `hover:` / `focus:` / `active:` classes, combined with the breakpoint when made in a responsive preview (`md:hover:…`).
 
+## Animation
+
+**The Animate tab** (inspector → Animate) shows the selected element's motion and lets you tune it live:
+
+- **Transition:** which properties animate, plus duration, delay and easing. **Play Hover / Focus / Active** runs the transition by forcing that state for a moment, so you never have to move the mouse to see it.
+- **Keyframe animations** (Tailwind's `animate-*` or your own `@keyframes`): duration, delay, repeat, direction, fill, easing, the keyframes themselves, and **Replay**.
+- **Easing editor:** drag the curve's two handles, or pick a preset. Ease out comes first, because state changes should respond at once and then settle. Your theme's `--ease-*` tokens are offered too, and a small dot previews the curve at the element's own duration.
+- **Motion checks:**
+  - `transition: all`.
+  - `ease-in` on state changes, with a one-click switch to ease-out.
+  - Transitions over 400ms, which feel sluggish for hover and press.
+  - `will-change` on properties the GPU can't composite.
+
+**The timeline** (**M**, or the timer in the toolbar) opens a drawer under the canvas:
+
+- It records every animation that runs on the page: CSS transitions, keyframe animations, and `element.animate()` (the Web Animations API).
+- Animations that start together are grouped as one interaction.
+- **Speed:** **100% · 25% · 10%** slows everything down, which is the best way to see what feels off.
+- **Replay** runs a group again with its original offsets, so staggers stay staggered.
+- **Pause** freezes the whole page.
+- Click a row to select that element in the Animate tab.
+
+**Back to code:**
+
+| Edit | Written as |
+|---|---|
+| transition duration / delay | `duration-250`, `delay-100` (on Tailwind v3, the scale or `duration-[250ms]`) |
+| easing | `ease-out`, `ease-in-out`, `ease-linear` when it's Tailwind's curve; your token's class (`ease-snappy`); otherwise `ease-[cubic-bezier(0.2,0,0,1)]` |
+| transitioned properties | `transition-opacity`, `transition-transform`, `transition-colors`, `transition-[opacity,scale]` |
+| keyframe timing | arbitrary properties, e.g. `[animation-duration:1200ms]`, since Tailwind has no utilities for those |
+
+The Checks panel also warns when keyframe animations run on a page that has no `prefers-reduced-motion` handling. Use Tailwind's `motion-safe:` or a media query.
+
+Motion (motion.dev) components come next: reading and editing their `animate`/`transition` props, springs, and writing them back.
+
 ## Checks: tokens & accessibility
 
 Watcher checks the page against your design tokens and the common WCAG rules. It runs in two places:
@@ -258,7 +293,7 @@ Edits you haven't applied yet, added elements, guides and canvas mode are saved 
 | | |
 |---|---|
 | **Production** | 0 bytes with Vite and webpack: the package's `production` export condition resolves to an empty module. Other bundlers still emit the lazy chunk, but a `NODE_ENV` check means it never loads. |
-| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~80 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
+| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~87 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
 | **Open** | It runs in its own shadow root and React root, so your app's CSS can't reach it and it never re-renders your tree. It redraws only when something it shows actually moved. |
 
 ## Features

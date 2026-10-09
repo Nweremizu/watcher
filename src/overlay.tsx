@@ -1199,7 +1199,7 @@ const KEYS: [string, string][] = [
   ['Measure spacing', 'hold Alt'], ['Open in SVG editor', 'Enter · dbl-click'], ['Pick colour from screen', 'I'], ['Pixel grid', '⇧G'],
   ['Zoom', 'Ctrl + scroll'], ['Fit / 100%', '⇧1 / Ctrl 0'],
   ['Parent / child', '⇧↵ / ↵'], ['Deep select', 'Ctrl click'], ['Nudge', '← ↑ → ↓'], ['Hide element', 'Del'], ['Undo / redo', 'Ctrl Z / Ctrl ⇧Z'],
-  ['Canvas mode', '⇧C'], ['Responsive preview', '⇧V'], ['X-ray', 'X'], ['Duplicate', 'Ctrl D · Alt drag'], ['Copy / paste', 'Ctrl C / V'], ['Forward / back', '] / ['],
+  ['Anatomy', 'hold ⇧ · A to lock'], ['Canvas mode', '⇧C'], ['Responsive preview', '⇧V'], ['X-ray', 'X'], ['Duplicate', 'Ctrl D · Alt drag'], ['Copy / paste', 'Ctrl C / V'], ['Forward / back', '] / ['],
   ['Rulers', '⇧R'], ['Close overlay', 'Alt D'],
 ]
 const Help = () => (
@@ -1883,6 +1883,38 @@ function Ruler({ vertical, len, o, z, hi, marks, style, onDown }: { vertical?: b
 }
 
 // ── overlay ─────────────────────────────────────────────────────────────────
+// ── anatomy: an element's box model laid out on screen ──
+type ARect = { x: number; y: number; w: number; h: number }
+type ARegion = ARect & { kind: 'pad' | 'mar' | 'gap'; v: number }
+/** Margin/padding/gap regions of `el` in client px (z = page zoom), plus its content box and children. */
+function anatomyOf(el: HTMLElement, z: number) {
+  const r = el.getBoundingClientRect(), cs = getComputedStyle(el)
+  const n = (p: string) => parseFloat(cs.getPropertyValue(p)) || 0
+  const sides = (f: (d: string) => string) => ['top', 'right', 'bottom', 'left'].map(d => n(f(d)))
+  const [mt, mr, mb, ml] = sides(d => `margin-${d}`), [bt, br, bb, bl] = sides(d => `border-${d}-width`), [pt, pr, pb, pl] = sides(d => `padding-${d}`)
+  const B: ARect = { x: r.left, y: r.top, w: r.width, h: r.height }
+  const inset = (o: ARect, t: number, rr: number, b: number, l: number): ARect => ({ x: o.x + l * z, y: o.y + t * z, w: o.w - (l + rr) * z, h: o.h - (t + b) * z })
+  const M: ARect = { x: B.x - ml * z, y: B.y - mt * z, w: B.w + (ml + mr) * z, h: B.h + (mt + mb) * z }
+  const I = inset(B, bt, br, bb, bl), C = inset(I, pt, pr, pb, pl)
+  // four bands between an outer and an inner box: top/bottom full width, left/right between them
+  const ring = (o: ARect, i: ARect, kind: ARegion['kind'], [t, rr, b, l]: number[]): ARegion[] => [
+    { kind, v: t, x: o.x, y: o.y, w: o.w, h: i.y - o.y },
+    { kind, v: b, x: o.x, y: i.y + i.h, w: o.w, h: o.y + o.h - (i.y + i.h) },
+    { kind, v: l, x: o.x, y: i.y, w: i.x - o.x, h: i.h },
+    { kind, v: rr, x: i.x + i.w, y: i.y, w: o.x + o.w - (i.x + i.w), h: i.h },
+  ]
+  const regions = [...ring(M, B, 'mar', [mt, mr, mb, ml]), ...ring(I, C, 'pad', [pt, pr, pb, pl])].filter(g => g.v > 0 && g.w > 0.5 && g.h > 0.5)
+  // gaps: the space between consecutive children of a flex/grid container
+  const kids = layerKids(el).map(k => k.getBoundingClientRect()).filter(k => k.width || k.height)
+  if (/flex|grid/.test(cs.display)) for (let i = 1; i < kids.length; i++) {
+    const a = kids[i - 1], b = kids[i]
+    const top = Math.max(a.top, b.top), bot = Math.min(a.bottom, b.bottom), lft = Math.max(a.left, b.left), rgt = Math.min(a.right, b.right)
+    if (b.left - a.right > 0.5 && bot > top) regions.push({ kind: 'gap', v: (b.left - a.right) / z, x: a.right, y: top, w: b.left - a.right, h: bot - top })
+    else if (b.top - a.bottom > 0.5 && rgt > lft) regions.push({ kind: 'gap', v: (b.top - a.bottom) / z, x: lft, y: a.bottom, w: rgt - lft, h: b.top - a.bottom })
+  }
+  return { M, B, C, regions, kids }
+}
+
 const rp = (b: { x: number; y: number; w: number; h: number }) => `M${b.x} ${b.y}h${b.w}v${b.h}h${-b.w}z`
 const TOOLS: [Tool, string, string][] = [
   ['select', P.cursor, 'Select & move · V'], ['rect', P.rect, 'Rectangle · R'], ['pen', P.nib, 'Pen · P'],
@@ -1911,6 +1943,8 @@ function Overlay() {
   const [frameInspect, setFrameInspect] = useState(true)
   const [alt, setAlt] = useState(false)
   const [xray, setXray] = useState(false)
+  const [shiftDown, setShiftDown] = useState(false) // hold Shift = anatomy
+  const [anatLock, setAnatLock] = useState(false) // A = keep anatomy on
   const [selGuide, setSelGuide] = useState<number | null>(null)
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   const L = useRef({
@@ -2208,6 +2242,7 @@ function Overlay() {
       if (e.key === 'Alt') { e.preventDefault(); setAlt(true); return }
       const p = e.composedPath()[0] as HTMLElement | undefined
       if (p?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(p?.tagName ?? '')) return
+      if (e.key === 'Shift') { if (!e.repeat) setShiftDown(true); return }
       const mod = e.metaKey || e.ctrlKey, s = L.sel, k = e.key, lk = k.toLowerCase()
       const pn = pe.node
       if (pen.cur && (k === 'Escape' || k === 'Enter')) { const svg = finishPen(); if (svg) select(svg as unknown as HTMLElement); setTool('select') }
@@ -2234,6 +2269,7 @@ function Overlay() {
       else if (lk === 'i' && !e.shiftKey) eyedrop()
       else if (k === 'P' && e.shiftKey) setTool('draw')
       else if (lk === 'x' && !e.shiftKey) setXray(v => !v)
+      else if (lk === 'a' && !e.shiftKey) setAnatLock(v => !v)
       else if (!e.shiftKey && TOOL_KEYS[k]) setTool(TOOL_KEYS[k])
       else if (k === 'R' && e.shiftKey) setShow(v => ({ ...v, rulers: !v.rulers }))
       else if (s && (k === ']' || k === '[')) setStyle(s, 'z-index', String(Math.max(0, (parseInt(getComputedStyle(s).zIndex) || 0) + (k === ']' ? 1 : -1))))
@@ -2254,8 +2290,9 @@ function Overlay() {
     const keyup = (e: KeyboardEvent) => {
       if (e.key === ' ') { L.space = false; setSpace(false) }
       if (e.key === 'Alt') { e.preventDefault(); setAlt(false) }
+      if (e.key === 'Shift') setShiftDown(false)
     }
-    const blur = () => { setAlt(false); L.space = false; setSpace(false) }
+    const blur = () => { setShiftDown(false); setAlt(false); L.space = false; setSpace(false) }
 
     const wheel = (e: WheelEvent) => {
       if (FRAME || !L.open || fromOverlay(e)) return
@@ -2487,6 +2524,10 @@ function Overlay() {
     <button key={t} className={'b' + ((space ? 'hand' : tool) === t ? ' on' : '')} data-tip={tip} onClick={() => setTool(t)}><Icon d={d} /></button>
   )
 
+  // anatomy (hold Shift / A): dim everything but the hovered (or selected) element and lay out its box model
+  const anatEl = (shiftDown || anatLock) && !covered ? (hv ?? (sel?.isConnected ? sel : null)) : null
+  const an = anatEl ? anatomyOf(anatEl, z) : null
+
   // the in-page layer: shared by the full overlay and frame mode
   const stage = <>
         <svg className="stage" width={vw} height={vh}>
@@ -2498,7 +2539,21 @@ function Overlay() {
             <rect key={'f' + i} className={'flash-' + f.kind} opacity={1 - (now - f.t) / 700} x={o.x + f.b.l * z} y={o.y + f.b.t * z} width={f.b.w * z} height={f.b.h * z} />
           ))}
           {/* always mounted, so moving to another element morphs the outline (CSS transition) instead of jumping */}
-          {(hr || L.lastHov) && (() => { const b = hr ?? L.lastHov!; if (hr) L.lastHov = hr; return (
+          {an && <>
+            <defs>
+              {(['pad', 'mar', 'gap'] as const).map(k => (
+                <pattern key={k} id={'an-' + k} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                  <rect width="6" height="6" className={'an-bg ' + k} /><line x1="0" y1="0" x2="0" y2="6" className={'an-ln ' + k} />
+                </pattern>
+              ))}
+            </defs>
+            <path className="an-dim" fillRule="evenodd" d={rp({ x: 0, y: 0, w: vw, h: vh }) + rp(an.M)} />
+            {an.regions.map((g, i) => <rect key={i} x={g.x} y={g.y} width={g.w} height={g.h} fill={`url(#an-${g.kind})`} />)}
+            {an.kids.map((k, i) => <rect key={'k' + i} className="an-kid" x={k.left + 0.5} y={k.top + 0.5} width={Math.max(0, k.width - 1)} height={Math.max(0, k.height - 1)} />)}
+            <rect className="an-content" x={an.C.x} y={an.C.y} width={Math.max(0, an.C.w)} height={Math.max(0, an.C.h)} />
+            <rect className="an-box" x={an.B.x} y={an.B.y} width={an.B.w} height={an.B.h} />
+          </>}
+          {!an && (hr || L.lastHov) && (() => { const b = hr ?? L.lastHov!; if (hr) L.lastHov = hr; return (
             <rect className={'hov' + (hr ? '' : ' off')} style={{ x: b.left + 0.5, y: b.top + 0.5, width: Math.max(0, b.width - 1), height: Math.max(0, b.height - 1) }} />
           ) })()}
           {!hr && target && <rect className="hov dash" x={target.left + 0.5} y={target.top + 0.5} width={Math.max(0, target.width - 1)} height={Math.max(0, target.height - 1)} />}
@@ -2512,7 +2567,16 @@ function Overlay() {
         </svg>
 
         {lines.map((l, i) => <div key={i} className="pill" style={{ left: (l.x1 + l.x2) / 2, top: (l.y1 + l.y2) / 2, transform: 'translate(-50%,-50%)' }}>{l.v}</div>)}
-        {hv && hr && (
+        {an && anatEl && <>
+          {an.regions.map((g, i) => (
+            <div key={i} className={'an-pill ' + g.kind} style={{ left: g.x + g.w / 2, top: g.y + g.h / 2 }}>{round(g.v)}</div>
+          ))}
+          <div className="an-head" style={{ left: an.M.x, top: Math.max(an.M.y - 6, cy0 + 26) }}>
+            <b>{label(anatEl)}</b><span>{round(an.B.w / z)} × {round(an.B.h / z)}</span>
+            <i className="pad">padding</i><i className="mar">margin</i>{an.regions.some(g => g.kind === 'gap') && <i className="gap">gap</i>}
+          </div>
+        </>}
+        {!an && hv && hr && (
           <div className="htip" style={{ left: hr.left, top: Math.max(hr.top - 6, cy0 + 26) }}>
             <span className="tag">{hv.tagName.toLowerCase()}</span><span>{trail(hv)}</span>
           </div>
@@ -2676,6 +2740,7 @@ function Overlay() {
             <button className="b sm" onClick={() => setXray(false)}>Exit</button>
           </div>
         )}
+        {anatLock && <div className="banner ui"><Icon d={P.frame} /><b>Anatomy</b><span>Hover any element to break it down. Hold Shift for a quick look anytime.</span><button className="b sm" onClick={() => setAnatLock(false)}>Exit · A</button></div>}
         {pen.cur && <div className="banner ui"><Icon d={P.nib} /><b>Pen</b><span>Click to add points, drag for curves. Click the first point or press Enter to finish.</span></div>}
       </div>
 
@@ -2809,6 +2874,23 @@ const CSS_TEXT = `
 
 /* stage */
 .stage { position: absolute; inset: 0; overflow: visible; }
+/* anatomy */
+.stage .an-dim { fill: oklch(0% 0 0 / .52); }
+.stage .an-bg.pad { fill: color-mix(in oklch, var(--primary) 16%, transparent); } .stage .an-ln.pad { stroke: var(--primary); }
+.stage .an-bg.mar { fill: oklch(80% .15 85 / .18); } .stage .an-ln.mar { stroke: oklch(74% .16 80); }
+.stage .an-bg.gap { fill: oklch(65% .2 300 / .16); } .stage .an-ln.gap { stroke: oklch(62% .2 300); }
+.stage .an-ln { stroke-width: 1.4; }
+.stage .an-box { fill: none; stroke: var(--primary); stroke-width: 1.5; }
+.stage .an-content { fill: none; stroke: #fff; stroke-width: 1; stroke-dasharray: 3 3; mix-blend-mode: difference; }
+.stage .an-kid { fill: none; stroke: oklch(100% 0 0 / .45); stroke-width: 1; }
+.an-pill { position: absolute; transform: translate(-50%, -50%); padding: 1px 5px; border-radius: 4px; font: 600 10px/13px var(--mono); color: #fff; pointer-events: none; box-shadow: 0 1px 3px oklch(0% 0 0 / .3); }
+.an-pill.pad { background: var(--primary); } .an-pill.mar { background: oklch(70% .16 75); } .an-pill.gap { background: oklch(58% .2 300); }
+.an-head { position: absolute; transform: translateY(-100%); display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 7px; background: var(--tip-bg); color: var(--tip-fg); box-shadow: 0 0 0 1px var(--tip-border), 0 6px 18px oklch(0% 0 0 / .3); font-size: 11px; white-space: nowrap; pointer-events: none; }
+.an-head span { color: var(--tip-muted); font-family: var(--mono); }
+.an-head i { font-style: normal; display: inline-flex; align-items: center; gap: 4px; color: var(--tip-muted); }
+.an-head i::before { content: ""; width: 8px; height: 8px; border-radius: 2px; }
+.an-head i.pad::before { background: var(--primary); } .an-head i.mar::before { background: oklch(74% .16 80); } .an-head i.gap::before { background: oklch(62% .2 300); }
+
 /* hover = dashed, selection = solid; the hover outline morphs between elements with a slight overshoot */
 .stage .hov { transition: x .32s var(--goo), y .32s var(--goo), width .32s var(--goo), height .32s var(--goo), opacity .18s; }
 .stage .hov.off { opacity: 0; }

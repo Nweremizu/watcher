@@ -14,6 +14,10 @@
     "design-system"
   ],
   "license": "MIT",
+  "author": "Bruno Nweremizu",
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "sideEffects": false,
   "exports": {

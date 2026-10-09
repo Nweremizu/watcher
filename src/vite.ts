@@ -6,11 +6,20 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import type { Plugin } from 'vite'
+import { loadEnv, type Plugin } from 'vite'
 import { editSource, stampSource, type ElementEdit } from './writeback.ts'
 
 type TwVersion = 3 | 4
 export type WatcherPluginOptions = { /** Tailwind major version; detected from package.json when omitted. */ tailwind?: TwVersion }
+/** WATCHER=false turns Watcher off, WATCHER_SHORTCUT sets its keys. From the shell or any .env file. */
+function envConfig(mode: string, dir: string) {
+  const env = loadEnv(mode, dir, 'WATCHER')
+  const out: { enabled?: boolean; shortcut?: string } = {}
+  const flag = env.WATCHER?.trim().toLowerCase()
+  if (flag) out.enabled = !/^(0|false|off|no)$/.test(flag)
+  if (env.WATCHER_SHORTCUT?.trim()) out.shortcut = env.WATCHER_SHORTCUT.trim()
+  return out
+}
 
 /** Nearest package.json's tailwindcss version (4 if not found). */
 function detectTailwind(from: string): TwVersion {
@@ -42,12 +51,20 @@ const DEVTOOLS_HOOK = `if(!window.__REACT_DEVTOOLS_GLOBAL_HOOK__){var r=new Map(
 export function watcher(opts: WatcherPluginOptions = {}): Plugin {
   let root = process.cwd()
   let ver: TwVersion = 4
+  let cfg: { enabled?: boolean; shortcut?: string } = {}
   return {
     name: 'watcher-ui',
     apply: 'serve',
     enforce: 'pre', // stamp the JSX before React's transform turns it into calls
-    transformIndexHtml: () => [{ tag: 'script', injectTo: 'head-prepend', children: DEVTOOLS_HOOK }],
-    configResolved(c) { root = c.root; ver = opts.tailwind ?? detectTailwind(root) },
+    transformIndexHtml: () => [{
+      tag: 'script', injectTo: 'head-prepend',
+      children: DEVTOOLS_HOOK + (Object.keys(cfg).length ? `;window.__WATCHER__=${JSON.stringify(cfg).replace(/</g, '\\u003c')}` : ''),
+    }],
+    configResolved(c) {
+      root = c.root
+      ver = opts.tailwind ?? detectTailwind(root)
+      cfg = envConfig(c.mode, typeof c.envDir === 'string' ? c.envDir : root)
+    },
     transform(code, id) {
       const file = id.split('?')[0]
       if (!/\.[jt]sx$/.test(file) || file.includes(`${sep}node_modules${sep}`) || file.includes('/node_modules/')) return

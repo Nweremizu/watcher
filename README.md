@@ -6,11 +6,28 @@
 
 Rulers and guides, live style editing, a free canvas, an SVG editor, design-system extraction and a profiler, all on top of the real page. Dev-only: production builds ship none of it.
 
+## Contents
+
+- [Getting started](#getting-started)
+- [When Watcher runs](#when-watcher-runs): dev only, turning it off, environment variables
+- [Keyboard shortcut](#keyboard-shortcut): changing the key, and how to write any key
+- [Options](#options)
+- [Write edits back to your code](#write-edits-back-to-your-code-tailwind)
+- [Component props](#component-props) · [Forced states](#forced-states) · [Sessions](#sessions)
+- [What it costs your app](#what-it-costs-your-app) · [Features](#features)
+
+## Getting started
+
+**1. Install** it as a dev dependency:
+
 ```bash
 npm i -D watcher-ui
 ```
 
+**2. Render it** once, next to your app:
+
 ```tsx
+// main.tsx
 import { Watcher } from 'watcher-ui'
 
 root.render(
@@ -21,13 +38,7 @@ root.render(
 )
 ```
 
-Press **Alt D** (or click the button in the bottom-right corner) to open it.
-
-Not using React components at the mount point? `mountWatcher()` does the same and returns a cleanup function.
-
-## Write edits back to your code (Tailwind)
-
-Add the Vite plugin and inspector edits can be written into your JSX as Tailwind classes:
+**3. Add the Vite plugin** (optional, but it's what lets edits go back into your code, and lets you edit component props live):
 
 ```ts
 // vite.config.ts
@@ -38,7 +49,148 @@ export default defineConfig({
 })
 ```
 
-Edit an element, then open **Apply to code** (in the toolbar, or the `</>` button under the inspector). Each element shows its file and line, the class diff, and how every value maps (`padding-top: 44px → pt-11`). Click **Apply to code** and the plugin rewrites the className, hot reload takes over, and the live preview is cleared.
+**4. Open it.** Start your dev server and press **Alt+D** (**⌥D** on a Mac), or click the button in the bottom-right corner. Press the same keys again to close it.
+
+Not mounting with React components? `mountWatcher(options)` does the same as `<Watcher />` and returns a cleanup function.
+
+## When Watcher runs
+
+**Watcher runs in development only, automatically.** You don't need to wrap it in an `if`.
+
+- **In production builds it doesn't exist.** The package has a `production` export condition, so Vite and webpack swap it for an empty module and none of the overlay is in your bundle. With other bundlers, a `process.env.NODE_ENV === 'production'` check keeps it from loading.
+- **The Vite plugin only runs on the dev server** (`apply: 'serve'`). It does nothing during `vite build`.
+
+That means `enabled` and the environment variables below can only turn Watcher **off** during development, or leave it on. Nothing can turn it on in a production build. That's deliberate.
+
+### Turning it off in code
+
+```tsx
+<Watcher enabled={false} />
+```
+
+Or from your own environment variable. Watcher can't read your env vars itself (every bundler exposes them differently), so pass the value in:
+
+```tsx
+// Vite: VITE_WATCHER=false in .env.local turns it off
+<Watcher enabled={import.meta.env.VITE_WATCHER !== 'false'} />
+
+// Next.js: NEXT_PUBLIC_WATCHER=false in .env.local
+<Watcher enabled={process.env.NEXT_PUBLIC_WATCHER !== 'false'} />
+```
+
+### Turning it off with an environment variable (Vite plugin)
+
+If you use `watcher-ui/vite`, it reads two variables. Put them in your shell or in any `.env` file next to your Vite root (`.env.local` keeps them to your machine):
+
+| Variable | Values | Effect |
+|---|---|---|
+| `WATCHER` | `false`, `0`, `off` or `no` turns it off; `true`, `1`, `on` or `yes` turns it on | Overrides `enabled` |
+| `WATCHER_SHORTCUT` | a shortcut, e.g. `Ctrl+Shift+K` | Overrides `shortcut` |
+
+```bash
+# one-off, from the shell
+WATCHER=false npm run dev
+```
+
+```ini
+# .env.local (keep it out of git)
+WATCHER_SHORTCUT=Ctrl+Shift+K
+```
+
+These variables beat the props on purpose. That way one developer can switch Watcher off, or move its key, without changing code the team shares. Restart the dev server after editing a `.env` file.
+
+### Which setting wins
+
+| What | Highest priority first |
+|---|---|
+| **On / off** | production build (always off) → `WATCHER` env var → `enabled` prop → on |
+| **Shortcut** | the key you recorded in Settings (this browser only) → `WATCHER_SHORTCUT` env var → `shortcut` prop → `Alt+D` |
+
+When Watcher is off, it renders nothing: no button, no key listener, and the overlay code is never downloaded.
+
+## Keyboard shortcut
+
+The default is **Alt+D** (**⌥D** on a Mac). There are three ways to change it.
+
+**For everyone on the project**, in code:
+
+```tsx
+<Watcher shortcut="Mod+Shift+K" />
+```
+
+**For your machine only**, with `WATCHER_SHORTCUT=Mod+Shift+K` in `.env.local` (needs the Vite plugin, see above).
+
+**For your browser only**, without writing anything: open Watcher → the gear icon at the bottom of the left sidebar → **Shortcut**. Click the button, press the keys you want, and that's it. Press **Esc** to cancel, and use the ↺ button to go back to the app's shortcut. The panel also shows the exact `shortcut="…"` text for what you pressed, ready to paste into your code. That's the easiest way to get a key's name right.
+
+### How to write a shortcut
+
+Write the modifiers first and the key last, joined with `+`. Upper or lower case and spaces don't matter, so `Ctrl+Shift+K`, `ctrl+shift+k` and `Ctrl + Shift + K` are the same.
+
+**Modifiers**
+
+| Write | Means | Also accepted |
+|---|---|---|
+| `Ctrl` | Control | `Control`, `Ctl` |
+| `Alt` | Alt, or Option (⌥) on a Mac | `Option`, `Opt` |
+| `Shift` | Shift | |
+| `Meta` | ⌘ Command on a Mac, the ⊞ Windows key on Windows | `Cmd`, `Command`, `Win`, `Super` |
+| `Mod` | **⌘ on a Mac, Ctrl everywhere else.** Use this when your team mixes Macs and PCs. | |
+
+**Keys**
+
+| Key | Write |
+|---|---|
+| Letters | `A` … `Z` |
+| Numbers (top row) | `0` … `9` |
+| Function keys | `F1` … `F24` |
+| Arrows | `Up`, `Down`, `Left`, `Right` (or `ArrowUp` …) |
+| Space, Enter, Tab, Esc | `Space`, `Enter`, `Tab`, `Esc` |
+| Editing and navigation | `Backspace`, `Delete`, `Insert`, `Home`, `End`, `PageUp`, `PageDown` |
+| `.` `,` `/` `;` `'` | the character itself, or `Period`, `Comma`, `Slash`, `Semicolon`, `Quote` |
+| `[` `]` `\` | the character itself, or `BracketLeft`, `BracketRight`, `Backslash` |
+| `-` `=` `` ` `` | the character itself, or `Minus`, `Equal`, `Backquote` |
+| `+` | `Plus` (it's the `=` key, so `Ctrl+Plus` is the same as `Ctrl+=`) |
+| Number pad | `Numpad0` … `Numpad9`, `NumpadAdd`, `NumpadEnter` … |
+
+Any [`KeyboardEvent.code`](https://developer.mozilla.org/docs/Web/API/UI_Events/Keyboard_event_code_values) value works as the key too, such as `KeyD`, `Digit1` or `Numpad5`.
+
+**Examples**
+
+| Shortcut | Press |
+|---|---|
+| `Alt+D` | Alt and D (⌥D on a Mac). The default. |
+| `Mod+Shift+K` | ⌘⇧K on a Mac, Ctrl+Shift+K on Windows and Linux |
+| `Ctrl+.` | Ctrl and the full stop |
+| `Alt+Backquote` | Alt and the `` ` `` key, top-left on most keyboards |
+| `F2` | just F2 |
+| `Shift+F10` | Shift and F10 |
+
+### Things to know
+
+- **Keys are matched by position, not by the character they type.** `Alt+D` is the key labelled D on a US keyboard, wherever your layout puts it. It still works on a Mac, where ⌥D types `∂`. On AZERTY, QWERTZ and other layouts, a letter or punctuation name means the key in that *US* position. When in doubt, record it in Settings and copy the text it shows.
+- **Modifiers must match exactly.** `Alt+D` doesn't fire on Alt+Shift+D.
+- **Include Ctrl, Alt or ⌘** unless you're using a function key. A shortcut like `F2` or `Shift+K` is ignored while you're typing in an input on the page, so it never steals your typing. The Settings recorder asks for a modifier for the same reason.
+- **Avoid keys the browser or OS keeps.** The page never sees combinations like Ctrl+W, Ctrl+T, Ctrl+N, ⌘Q or ⌘Tab.
+- **Don't reuse one of Watcher's own keys.** While it's open, Watcher uses single letters (V, R, P, T, H, X…) and Ctrl+Z, Ctrl+Shift+Z, Ctrl+D, Ctrl+C, Ctrl+V and Ctrl+0. Your shortcut takes priority, so `Ctrl+D` would close Watcher instead of duplicating. The full list is in the inspector when nothing is selected.
+- **If Watcher can't read your shortcut**, it uses Alt+D and logs a warning in the browser console with examples.
+
+## Options
+
+| Option | Type | Default | |
+|---|---|---|---|
+| `enabled` | `boolean` | `true` in development | `false` turns Watcher off. Can't turn it on in a production build. |
+| `shortcut` | `string` | `'Alt+D'` | Keys that open and close Watcher. See [Keyboard shortcut](#keyboard-shortcut). |
+| `font` | `string` | | URL of a Timeless Sans `.woff2` your app serves, for Watcher's own UI. Never bundled. |
+
+```tsx
+<Watcher enabled={import.meta.env.VITE_WATCHER !== 'false'} shortcut="Mod+Shift+K" />
+```
+
+`mountWatcher({ enabled, shortcut, font })` takes the same options.
+
+## Write edits back to your code (Tailwind)
+
+With the [Vite plugin](#getting-started) installed, inspector edits can be written into your JSX as Tailwind classes. Edit an element, then open **Apply to code** (in the toolbar, or the `</>` button under the inspector). Each element shows its file and line, the class diff, and how every value maps (`padding-top: 44px → pt-11`). Click **Apply to code** and the plugin rewrites the className, hot reload takes over, and the live preview is cleared.
 
 - **Styles** become Tailwind utilities on the scale where possible (`pt-11`, `text-5xl`, `rounded-xl`) and arbitrary values otherwise (`text-[#d4570f]`, `w-[293px]`). The class for the same property is replaced; `md:`/`hover:` variants are left alone.
 - **Text** and **attributes** (href, alt, aria-*) are written too, when the JSX holds them literally.
@@ -85,13 +237,13 @@ Edits you haven't applied yet, added elements, guides and canvas mode are saved 
 - **Profiler:** frame rate, DOM updates, JS heap, long tasks and layout shifts, with on-page highlighting.
 - **X-ray:** every painted element outlined and coloured by depth.
 
-Edits are inline styles on the live page, and they're gone on reload.
+Edits preview live on the page. They're kept per page until you apply or discard them (see [Sessions](#sessions)). **Apply to code** writes them into your JSX, and **Copy CSS** copies them.
 
 ## Development
 
 ```bash
 npm run dev     # demo app at http://localhost:5179, using src/ directly
-npm run check   # type-check + path parser checks
+npm run check   # type-check + path, write-back and shortcut checks
 npm run build   # dist/: entry, production no-op, lazy overlay chunk, types
 npm run icons   # pull the latest Framework7 Icons and regenerate src/icons.ts
 ```

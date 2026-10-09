@@ -2,7 +2,7 @@
  *
  * Watcher: the overlay itself. Loaded lazily by ./index.ts, never imported by production builds.
  *
- * Alt+D toggles it. Edits preview live (inline styles, forced-state rules, prop overrides), are kept per page
+ * Alt+D (or the `shortcut` option) toggles it. Edits preview live (inline styles, forced-state rules, prop overrides), are kept per page
  * until applied or discarded, and go back to source through the Code panel (watcher-ui/vite) or Copy CSS.
  */
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as RPointerEvent, type ReactNode } from 'react'
@@ -11,6 +11,7 @@ import { createRoot } from 'react-dom/client'
 import { parsePath, serializePath, splitSeg, bezAt, shapeD, type PNode, type Sub } from './path'
 import { ICONS, ICON_VIEWBOX } from './icons'
 import { forceSelectors, hasState } from './states'
+import { DEFAULT_SHORTCUT, matchesShortcut, parseShortcut, shortcutFromEvent, shortcutLabel, stringifyShortcut, type Shortcut } from './shortcut'
 
 type Tool = 'select' | 'text' | 'draw' | 'hand' | 'rect' | 'pen'
 type Guide = { id: number; axis: 'x' | 'y'; pos: number; pattern: 'solid' | 'dashed' | 'dotted'; color?: string; locked?: boolean }
@@ -61,6 +62,13 @@ const changes: Map<HTMLElement, Set<string>> = parentHost?.changes ?? new Map()
 const strokes: number[][] = []
 const prefs = { spacing: true, snap: true, alwaysMeasure: false, flashUpdates: false, flashShifts: true, persist: true }
 try { Object.assign(prefs, JSON.parse(localStorage.getItem('watcher:prefs') ?? '{}')) } catch { /* storage blocked */ }
+// the open/close shortcut: this browser's own choice (Settings) beats the app's `shortcut` option, which beats Alt+D
+let configShortcut: Shortcut = parseShortcut(DEFAULT_SHORTCUT)!
+const OWN_SHORTCUT = 'watcher:shortcut'
+const ownShortcut = () => { try { return localStorage.getItem(OWN_SHORTCUT) } catch { return null } }
+const activeShortcut = () => { const own = ownShortcut(); return (own && parseShortcut(own)) || configShortcut }
+const toggleLabel = () => shortcutLabel(activeShortcut())
+let recordingShortcut = false
 const savePrefs = () => { try { localStorage.setItem('watcher:prefs', JSON.stringify(prefs)) } catch { /* storage blocked */ } bump() }
 // pen: the path being drawn; pe: the path whose anchors are being edited
 type PenState = { svg: SVGSVGElement; path: SVGPathElement; subs: Sub[]; drag: boolean }
@@ -1439,6 +1447,37 @@ function GuidePanel({ g, update, remove }: { g: Guide; update: (p: Partial<Guide
 }
 
 const PREF_LABELS: [keyof typeof prefs, string][] = [['spacing', 'Show padding & margin'], ['snap', 'Smart snapping'], ['alwaysMeasure', 'Measure without holding Alt'], ['persist', 'Remember edits across reloads']]
+/** Record this browser's open/close shortcut by pressing it, and show the text to put in code for everyone. */
+function ShortcutField() {
+  const [rec, setRec] = useState(false)
+  const [msg, setMsg] = useState('')
+  const own = ownShortcut()
+  useEffect(() => {
+    if (!rec) return
+    recordingShortcut = true
+    const on = (e: KeyboardEvent) => {
+      e.preventDefault(); e.stopPropagation()
+      if (e.key === 'Escape') { setRec(false); return }
+      if (['Control', 'Alt', 'Shift', 'Meta', 'AltGraph', 'OS'].includes(e.key)) return // wait for the actual key
+      const s = shortcutFromEvent(e)
+      if (!s.ctrl && !s.alt && !s.meta && !/^F\d/.test(s.code)) { setMsg('Add Ctrl, Alt or Cmd (or use a function key) so it can’t clash with typing.'); return }
+      try { localStorage.setItem(OWN_SHORTCUT, stringifyShortcut(s)) } catch { /* storage blocked */ }
+      setMsg(''); setRec(false); bump()
+    }
+    addEventListener('keydown', on, true)
+    return () => { recordingShortcut = false; removeEventListener('keydown', on, true) }
+  }, [rec])
+  const reset = () => { try { localStorage.removeItem(OWN_SHORTCUT) } catch { /* storage blocked */ } bump() }
+  return (
+    <div className="scut">
+      <Row label="Shortcut">
+        <button className={'b sm kbtn' + (rec ? ' tg' : '')} onClick={() => { setMsg(''); setRec(r => !r) }}>{rec ? 'Press keys… (Esc cancels)' : toggleLabel()}</button>
+        {own && !rec && <button className="b xs" data-tip="Back to the app’s shortcut" onClick={reset}><Icon d={P.undo} size={13} /></button>}
+      </Row>
+      <p className="stnote">{msg || <>Only in this browser. For everyone: <code>{`<Watcher shortcut="${stringifyShortcut(activeShortcut())}" />`}</code></>}</p>
+    </div>
+  )
+}
 function Settings({ theme, setTheme, onClose }: { theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void; onClose: () => void }) {
   const [, force] = useState(0)
   return (
@@ -1447,6 +1486,7 @@ function Settings({ theme, setTheme, onClose }: { theme: 'light' | 'dark'; setTh
       <div className="menu">
         <Row label="Theme"><Seg value={theme} options={[['light', 'Light'], ['dark', 'Dark']] as const} onChange={setTheme} /></Row>
         {PREF_LABELS.map(([k, l]) => <Check key={k} checked={prefs[k]} onChange={v => { prefs[k] = v; savePrefs(); force(n => n + 1) }}>{l}</Check>)}
+        <ShortcutField />
       </div>
     </>
   )
@@ -1458,12 +1498,12 @@ const KEYS: [string, string][] = [
   ['Zoom', 'Ctrl + scroll'], ['Fit / 100%', '⇧1 / Ctrl 0'],
   ['Parent / child', '⇧↵ / ↵'], ['Deep select', 'Ctrl click'], ['Nudge', '← ↑ → ↓'], ['Hide element', 'Del'], ['Undo / redo', 'Ctrl Z / Ctrl ⇧Z'],
   ['Anatomy', 'hold ⇧ · A to lock'], ['Canvas mode', '⇧C'], ['Responsive preview', '⇧V'], ['X-ray', 'X'], ['Duplicate', 'Ctrl D · Alt drag'], ['Copy / paste', 'Ctrl C / V'], ['Forward / back', '] / ['],
-  ['Rulers', '⇧R'], ['Close overlay', 'Alt D'],
+  ['Rulers', '⇧R'],
 ]
 const Help = () => (
   <div className="help">
     <p>Click anything to inspect it. Every value edits live. Drag from a ruler to drop a guide, click a guide to edit it.</p>
-    <dl>{KEYS.map(([a, k]) => <div key={a}><dt>{a}</dt><dd><kbd>{k}</kbd></dd></div>)}</dl>
+    <dl>{[...KEYS, ['Open / close Watcher', toggleLabel()]].map(([a, k]) => <div key={a}><dt>{a}</dt><dd><kbd>{k}</kbd></dd></div>)}</dl>
   </div>
 )
 
@@ -2660,7 +2700,15 @@ function Overlay() {
     }
 
     const key = (e: KeyboardEvent) => {
-      if (e.altKey && e.code === 'KeyD') { if (FRAME) return; e.preventDefault(); if (L.open) L.close(); else setOpen(true); return }
+      if (recordingShortcut) return // Settings is listening for a new shortcut
+      const sc = activeShortcut()
+      if (matchesShortcut(e, sc)) {
+        if (FRAME) return
+        // a shortcut without Ctrl/Alt/Cmd (F2, Shift+K) must not fire while someone types into the page
+        const t = e.composedPath()[0] as HTMLElement | undefined
+        const typing = t?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t?.tagName ?? '')
+        if (!typing || sc.ctrl || sc.alt || sc.meta) { e.preventDefault(); if (L.open) L.close(); else setOpen(true); return }
+      }
       if (!L.open) return
       // hold Alt to measure; preventDefault stops Windows focusing the browser menu on release
       if (e.key === 'Alt') { e.preventDefault(); setAlt(true); return }
@@ -2873,7 +2921,7 @@ function Overlay() {
     if (FRAME) return null
     return (
       <div className="root" data-theme={theme}>
-        <button className="launch ui" data-tip={readSession()[pageKey()] ? 'Watcher · Alt D · unapplied edits saved' : 'Watcher · Alt D'} onClick={() => setOpen(true)}>
+        <button className="launch ui" data-tip={`Watcher · ${toggleLabel()}${readSession()[pageKey()] ? ' · unapplied edits saved' : ''}`} onClick={() => setOpen(true)}>
           <Mark size={26} />{!FRAME && prefs.persist && readSession()[pageKey()] && <i className="launch-dot" />}
         </button>
       </div>
@@ -3149,7 +3197,7 @@ function Overlay() {
         <button className={'b' + (show.layers ? ' tg' : '')} data-tip="Left sidebar" onClick={() => setShow(v => ({ ...v, layers: !v.layers }))}><Icon d={P.sideL} /></button>
         <button className={'b' + (show.inspector ? ' tg' : '')} data-tip="Right sidebar" onClick={() => setShow(v => ({ ...v, inspector: !v.inspector }))}><Icon d={P.sideR} /></button>
         <i className="sep" />
-        <button className="b" data-tip="Close · Alt D" onClick={close}><Icon d={P.x} /></button>
+        <button className="b" data-tip={`Close · ${toggleLabel()}`} onClick={close}><Icon d={P.x} /></button>
       </div>
 
       {/* ── left sidebar: site, pages, layers ── */}
@@ -3225,8 +3273,11 @@ declare const __VERSION__: string
  *  scales it and the app's CSS never leaks in). Returns the unmount function. Idempotent. */
 /** `font`: URL of a Timeless Sans woff2 your app serves. Watcher never ships the font itself (its license forbids
  *  redistribution); without it, an installed "Timeless Sans" is used, else the system UI font. */
-export function mount({ font }: { font?: string } = {}): () => void {
+export function mount({ font, shortcut }: { font?: string; shortcut?: string } = {}): () => void {
   if (HOST || (FRAME && !parentHost)) return () => {} // a preview frame needs the Watcher page around it
+  const sc = shortcut ? parseShortcut(shortcut) : null
+  if (shortcut && !sc) console.warn(`[watcher] Can't read shortcut "${shortcut}", using ${DEFAULT_SHORTCUT}. Examples: "Alt+D", "Mod+Shift+K", "F2".`)
+  configShortcut = sc ?? parseShortcut(DEFAULT_SHORTCUT)!
   const host = document.createElement('watcher-ui')
   host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;display:block'
   const shadow = host.attachShadow({ mode: 'open' })
@@ -3324,6 +3375,9 @@ const CSS_TEXT = `
 .launch { all: unset; position: absolute; right: 16px; bottom: 16px; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--surface); color: var(--text); box-shadow: var(--shadow-raised); cursor: pointer; }
 .launch:hover { box-shadow: var(--shadow-raised), 0 0 0 2px var(--primary); }
 .stbar { margin: 2px 0 10px; }
+.scut { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
+.scut .pc { gap: 4px; }
+.kbtn { flex: 1; min-width: 0; font-family: var(--mono); justify-content: center; }
 .stnote { margin: 6px 2px 0; font-size: 11px; line-height: 1.4; color: var(--text-muted); }
 .stnote code, .empty code { font-family: var(--mono); color: var(--primary); }
 .pstate { margin-left: 3px; opacity: .8; }

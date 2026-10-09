@@ -30,6 +30,18 @@ assert.equal(tw('justify-content', 'space-between'), 'justify-between')
 assert.equal(tw('box-shadow', '0 1px 2px red'), 'shadow-[0_1px_2px_red]')
 assert.ok(tw('translate', '10px 0px').startsWith('!'))
 
+// design tokens
+assert.equal(tw('color', 'var(--color-brand)'), 'text-brand')
+assert.equal(tw('background-color', 'var(--color-orange-500)'), 'bg-orange-500')
+assert.equal(tw('color', 'var(--brand)'), 'text-(--brand)')
+assert.equal(tw('color', 'var(--brand)', 3), 'text-[var(--brand)]')
+assert.equal(tw('font-size', 'var(--text-lg)'), 'text-lg')
+assert.equal(tw('font-size', 'var(--fs-body)'), 'text-(length:--fs-body)')
+assert.equal(tw('border-radius', 'var(--radius)'), 'rounded-(--radius)')
+assert.equal(tw('border-radius', 'var(--radius-card)'), 'rounded-card')
+assert.equal(tw('padding-top', 'var(--spacing-gutter)'), 'pt-gutter')
+assert.ok(tw('display', 'var(--x)').startsWith('!'))
+
 // merging: replaces only the same family and variant
 const m = (cls: string, s: Record<string, string>, v = '') => mergeClasses(cls, s, v).className
 assert.equal(m('p-4 pt-2 text-lg text-red-500', { 'padding-top': '44px' }), 'p-4 text-lg text-red-500 pt-11')
@@ -40,6 +52,12 @@ assert.equal(m('border border-gray-200 border-dashed', { 'border-width': '2px' }
 assert.equal(m('pt-2 md:pt-4 hover:pt-6', { 'padding-top': '8px' }), 'md:pt-4 hover:pt-6 pt-2')
 assert.equal(m('pt-2 md:pt-4', { 'padding-top': '8px' }, 'md:'), 'pt-2 md:pt-2')
 assert.equal(m('flex', { display: 'grid' }), 'grid')
+// token classes replace (and are replaced by) the same family
+assert.equal(m('text-lg text-[#666]', { color: 'var(--brand)' }), 'text-lg text-(--brand)')
+assert.equal(m('text-lg text-(--brand)', { color: '#000' }), 'text-lg text-[#000]')
+assert.equal(m('text-lg text-brand-soft', { color: 'var(--color-ink)' }), 'text-lg text-ink')
+assert.equal(m('text-(length:--fs) text-red-500', { 'font-size': '16px' }), 'text-red-500 text-base')
+assert.equal(m('rounded-(--radius) p-2', { 'border-radius': '8px' }), 'p-2 rounded-lg')
 
 // stamping
 const src = `export const A = () => (\n  <div className="p-4">\n    <h3>Hi</h3>\n    <Card title="x" />\n  </div>\n)\n`

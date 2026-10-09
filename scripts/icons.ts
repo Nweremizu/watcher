@@ -31,6 +31,7 @@ const MAP: Record<string, Src> = {
   canvas: 'square_fill_on_square_fill',
   phone: 'device_phone_portrait', tablet: 'device_tablet_portrait', desktop: 'desktopcomputer', laptop: 'device_laptop',
   orient: 'rotate_right', devices: 'rectangle_3_offgrid', code: 'chevron_left_slash_chevron_right',
+  shield: 'checkmark_shield', warn: 'exclamationmark_triangle', wand: 'wand_stars',
 }
 
 const require = createRequire(import.meta.url)

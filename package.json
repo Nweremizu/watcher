@@ -42,7 +42,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build --config vite.lib.config.ts && tsc -p tsconfig.build.json",
-    "check": "tsc --noEmit && node checks/path.check.ts && node checks/writeback.check.ts && node checks/shortcut.check.ts",
+    "check": "tsc --noEmit && node checks/path.check.ts && node checks/writeback.check.ts && node checks/shortcut.check.ts && node checks/guard.check.ts",
     "icons": "npm i -D framework7-icons@latest && node scripts/icons.ts",
     "prepublishOnly": "npm run check && npm run build"
   },

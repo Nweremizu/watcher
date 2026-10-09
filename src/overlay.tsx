@@ -11,6 +11,7 @@ import { createRoot } from 'react-dom/client'
 import { parsePath, serializePath, splitSeg, bezAt, shapeD, type PNode, type Sub } from './path'
 import { ICONS, ICON_VIEWBOX } from './icons'
 import { forceSelectors, hasState } from './states'
+import { contrast, contrastNeed, deltaE, fixContrast, isLargeText, nearestColor, nearestLength, over, toHex, type RGB, type Token } from './guard'
 import { DEFAULT_SHORTCUT, matchesShortcut, parseShortcut, shortcutFromEvent, shortcutLabel, stringifyShortcut, type Shortcut } from './shortcut'
 
 type Tool = 'select' | 'text' | 'draw' | 'hand' | 'rect' | 'pen'
@@ -1287,6 +1288,73 @@ function PropsSection({ el }: { el: HTMLElement }) {
   )
 }
 
+const RULE_TITLES: Record<string, string> = {
+  contrast: 'Low contrast', name: 'No accessible name', alt: 'Images without alt text', label: 'Unlabelled form fields',
+  target: 'Small targets', tabindex: 'Positive tabindex', 'hidden-focus': 'Focusable but hidden', heading: 'Headings', lang: 'Page language', title: 'Page title',
+}
+function IssueRow({ it, pick, all }: { it: Issue; pick?: (el: HTMLElement) => void; all?: Issue[] }) {
+  const n = all?.length ?? 1
+  return (
+    <div className={'ck ' + it.sev}>
+      <Icon d={P.warn} size={12} />
+      <span className="ckmsg" role={pick && it.el ? 'button' : undefined} onClick={() => pick && it.el && pick(it.el)}>
+        {pick && it.el && !all && <b>{label(it.el)} · </b>}{it.msg}{n > 1 && <em> · {n} elements</em>}
+      </span>
+      {it.fix && <button className="b xs ckfix" data-tip={n > 1 ? `Snap all ${n}` : 'Fix'} onClick={() => (all ?? [it]).forEach(i => i.fix?.run())}>{it.fix.label}</button>}
+    </div>
+  )
+}
+/** Contrast, accessibility and token checks for the selected element, live as you edit. */
+function ChecksSection({ el }: { el: HTMLElement }) {
+  const c = textContrast(el)
+  const issues = [...a11yIssues(el).filter(i => i.rule !== 'contrast'), ...tokenIssues(el)]
+  if (!c && !issues.length) return null
+  const fails = !!c && c.ratio < c.aa
+  const fix = fails ? contrastFix(el, c!) : undefined
+  return (
+    <Section title="Checks" n={issues.length + (fails ? 1 : 0) || undefined}>
+      {c && (
+        <div className={'ck ' + (fails ? 'error' : 'ok')}>
+          <span className="ckswatch" style={{ background: toHex(c.bg), color: toHex(c.fg) }}>Aa</span>
+          <span className="ckmsg"><b>{round(c.ratio, 2)}:1</b> {c.ratio >= c.aaa ? 'passes AAA' : c.ratio >= c.aa ? 'passes AA' : `fails AA (needs ${c.aa}:1)`}</span>
+          {fix && <button className="b xs ckfix" data-tip="Closest colour that passes" onClick={fix.run}>{fix.label}</button>}
+        </div>
+      )}
+      {issues.map((it, i) => <IssueRow key={i} it={it} />)}
+    </Section>
+  )
+}
+function ChecksPanel({ rev, select }: { rev: number; select: (el: HTMLElement) => void }) {
+  const [tab, setTab] = useState<'a11y' | 'tokens'>('a11y')
+  const [res, setRes] = useState<ReturnType<typeof audit> | null>(null)
+  useEffect(() => { const t = setTimeout(() => setRes(audit()), res ? 400 : 0); return () => clearTimeout(t) }, [rev]) // eslint-disable-line react-hooks/exhaustive-deps
+  const group = (list: Issue[], by: (i: Issue) => string) => { const m = new Map<string, Issue[]>(); for (const i of list) m.set(by(i), [...(m.get(by(i)) ?? []), i]); return [...m] }
+  const errors = res?.a11y.filter(i => i.sev === 'error').length ?? 0
+  const T = themeTokens()
+  return (
+    <>
+      <div className="tabbar"><Seg big value={tab} options={[['a11y', `Accessibility${res ? ` · ${res.a11y.length}` : ''}`], ['tokens', `Tokens${res ? ` · ${group(res.tokens, i => i.key!).length}` : ''}`]] as const} onChange={setTab} /></div>
+      <div className="pb">
+        {!res ? <p className="empty pad">Checking the page…</p>
+          : tab === 'a11y' ? (
+            res.a11y.length ? group(res.a11y, i => i.rule).map(([rule, list]) => (
+              <Section key={rule} title={RULE_TITLES[rule] ?? rule} n={list.length}>{list.map((it, i) => <IssueRow key={i} it={it} pick={select} />)}</Section>
+            )) : <p className="empty pad">No accessibility problems found on this page.</p>
+          ) : (
+            !T.colors.length && !T.sizes.length && !T.radii.length && !T.step && !T.spaces.length
+              ? <p className="empty pad">No design tokens found. Declare them as CSS variables on <code>:root</code> (Tailwind v4’s theme does this) and Watcher checks values against them.</p>
+              : res.tokens.length ? group(res.tokens, i => i.key!).sort((a, b) => b[1].length - a[1].length).map(([k, list]) => <IssueRow key={k} it={list[0]} pick={select} all={list} />)
+              : <p className="empty pad">Every checked value on this page is a token.</p>
+          )}
+      </div>
+      <div className="foot">
+        <span>{!res ? 'Checking…' : tab === 'a11y' ? `${errors} error${errors === 1 ? '' : 's'} · ${res.a11y.length - errors} warning${res.a11y.length - errors === 1 ? '' : 's'}` : `${T.colors.length} colour, ${T.sizes.length + T.radii.length + T.spaces.length} size tokens${T.step ? ` · ${T.step}px grid` : ''}`}</span>
+        <button className="b sm" data-tip="Check again" onClick={() => setRes(audit())}><Icon d={P.refresh} /></button>
+      </div>
+    </>
+  )
+}
+
 function DesignTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement | null) => void }) {
   const cs = getComputedStyle(el), r = el.getBoundingClientRect(), { o, z } = ctxOf(el)
   const get = (p: string) => cs.getPropertyValue(p)
@@ -1312,6 +1380,7 @@ function DesignTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement |
     <>
       <Crumbs el={el} select={select} />
       <StateBar el={el} />
+      <ChecksSection el={el} />
       <PropsSection el={el} />
       <Section title="Frame">
         <Lbl>Position</Lbl>
@@ -1653,16 +1722,183 @@ function scanStyles() {
   ds.elements = n
   ds.pages.add(location.pathname)
 
-  // CSS custom properties declared on :root / html, resolved to their current value
-  const root = getComputedStyle(document.documentElement)
+  for (const [k, v] of rootVars()) ds.vars.set(k, v)
+}
+/** CSS custom properties declared on :root / html, resolved to their current value. */
+function rootVars() {
+  const out = new Map<string, string>(), root = getComputedStyle(document.documentElement)
   const walk = (rules: CSSRuleList) => {
     for (const r of rules) {
       if (r instanceof CSSStyleRule && /(^|,)\s*(:root|html)\s*(,|$)/.test(r.selectorText)) {
-        for (const p of r.style) if (p.startsWith('--')) ds.vars.set(p, root.getPropertyValue(p).trim())
+        for (const p of r.style) if (p.startsWith('--')) out.set(p, root.getPropertyValue(p).trim())
       } else if ('cssRules' in r) walk((r as CSSGroupingRule).cssRules)
     }
   }
   for (const s of document.styleSheets) { try { walk(s.cssRules) } catch { /* cross-origin sheet */ } }
+  return out
+}
+
+// ── checks: design-token guardrails + accessibility ─────────────────────────
+type Tokens = { colors: Token[]; sizes: Token[]; radii: Token[]; spaces: Token[]; step?: number }
+type Issue = { el: HTMLElement | null; sev: 'error' | 'warn'; rule: string; msg: string; key?: string; fix?: { label: string; run: () => void } }
+const rgbOf = (c: string): RGB => { const { r, g, b, a } = rgba(c); return { r, g, b, a } }
+let tokCache: (Tokens & { at: number }) | null = null
+/** The app's design tokens: :root variables that hold a colour or a length, sorted by what they're for (by name). */
+function themeTokens(): Tokens {
+  if (tokCache && performance.now() - tokCache.at < 3000) return tokCache
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+  const t: Tokens = { colors: [], sizes: [], radii: [], spaces: [] }
+  for (const [name, v] of rootVars()) {
+    if (name.startsWith('--tw-')) continue
+    const len = /^(-?\d*\.?\d+)(px|rem)$/.exec(v)
+    if (len) {
+      const px = +len[1] * (len[2] === 'rem' ? rem : 1)
+      if (name === '--spacing') t.step = px // Tailwind v4: every multiple of it is on the scale
+      else if (/^--(text|font-size)/.test(name)) t.sizes.push({ name, px })
+      else if (/radius|rounded/.test(name)) t.radii.push({ name, px })
+      else if (/^--(spacing|space|gap)/.test(name)) t.spaces.push({ name, px })
+    } else if (!/^[\d.\s%-]*$/.test(v) && !/^(inherit|initial|unset|currentcolor|transparent)$/i.test(v) && CSS.supports('color', v)) t.colors.push({ name, rgb: rgbOf(v) })
+  }
+  // namespaced theme tokens first: they become named utilities (text-brand) when written back
+  for (const list of [t.colors, t.sizes, t.radii]) list.sort((a, b) => +/^--(color|text|radius)-/.test(b.name) - +/^--(color|text|radius)-/.test(a.name))
+  tokCache = { ...t, at: performance.now() }
+  return tokCache
+}
+/** The token an edited value equals exactly, as var(--x), so it's written back as text-brand rather than text-[#f38020]. */
+function tokenRef(prop: string, v: string): string | null {
+  if (v.startsWith('var(')) return null
+  const T = themeTokens()
+  if (/color$/.test(prop)) { if (!CSS.supports('color', v)) return null; const n = nearestColor(rgbOf(v), T.colors); return n?.exact ? `var(${n.token.name})` : null }
+  const px = /^(-?\d*\.?\d+)px$/.exec(v)?.[1]
+  const list = prop === 'font-size' ? T.sizes : prop === 'border-radius' ? T.radii : null
+  const t = px !== undefined && list?.find(t => Math.abs(t.px! - +px) < 0.01)
+  return t ? `var(${t.name})` : null
+}
+
+/** What's painted behind `el`: its and its ancestors' backgrounds, composited. Null when an image or gradient is involved. */
+function backdrop(el: Element): RGB | null {
+  const layers: RGB[] = []
+  for (let e: Element | null = el; e; e = e.parentElement) {
+    const cs = getComputedStyle(e)
+    if (cs.backgroundImage !== 'none') return null
+    const c = rgbOf(cs.backgroundColor)
+    if (c.a > 0) { layers.push(c); if (c.a >= 1) break }
+  }
+  return layers.reverse().reduce((acc, l) => over(l, acc), { r: 255, g: 255, b: 255, a: 1 })
+}
+type Contrast = { ratio: number; aa: number; aaa: number; fg: RGB; bg: RGB }
+function textContrast(el: HTMLElement): Contrast | null {
+  if (!hasText(el) || document.documentElement.classList.contains('do-xray')) return null // x-ray tints every background
+  const cs = getComputedStyle(el), bg = backdrop(el)
+  if (!bg) return null
+  const fg = over(rgbOf(cs.color), bg)
+  return { ratio: contrast(fg, bg), ...contrastNeed(isLargeText(parseFloat(cs.fontSize), +cs.fontWeight || 400)), fg, bg }
+}
+/** Closest colour that passes AA: a token if one is near, else the same hue lightened or darkened. */
+function contrastFix(el: HTMLElement, c: Contrast): Issue['fix'] {
+  const tok = themeTokens().colors.filter(t => t.rgb!.a === 1 && contrast(t.rgb!, c.bg) >= c.aa).map(t => ({ t, d: deltaE(t.rgb!, c.fg) })).sort((a, b) => a.d - b.d)[0]
+  const adj = fixContrast(c.fg, c.bg, c.aa)
+  if (tok && (!adj || tok.d < 20)) return { label: tok.t.name, run: () => editStyle(el, 'color', `var(${tok.t.name})`) }
+  return adj ? { label: toHex(adj), run: () => editStyle(el, 'color', toHex(adj)) } : undefined
+}
+function accessibleName(el: HTMLElement) {
+  const by = el.getAttribute('aria-labelledby')?.split(/\s+/).map(id => el.ownerDocument.getElementById(id)?.textContent ?? '').join(' ')
+  const inner = [...el.querySelectorAll('img[alt], [aria-label], svg title')].map(e => e.getAttribute('alt') || e.getAttribute('aria-label') || e.textContent || '').join('')
+  return (el.getAttribute('aria-label') || by || el.textContent || inner || el.title || (el as HTMLInputElement).value || '').trim()
+}
+const FOCUSABLE = 'a[href], button, input:not([type=hidden]), select, textarea, [tabindex]:not([tabindex="-1"])'
+/** WCAG 2.5.8's spacing exception: a small target is fine if a 24px circle on its centre touches no other target
+ *  (and no other small target's circle). */
+function crowded(el: HTMLElement, r: DOMRect, z: number) {
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2, R = 12 * z
+  for (const t of el.ownerDocument.querySelectorAll<HTMLElement>(FOCUSABLE)) {
+    if (t === el || t.contains(el) || el.contains(t)) continue
+    const q = t.getBoundingClientRect()
+    if (!q.width || !q.height) continue
+    if (Math.hypot(Math.max(q.left - cx, 0, cx - q.right), Math.max(q.top - cy, 0, cy - q.bottom)) < R) return true
+    if ((q.width < 2 * R || q.height < 2 * R) && Math.hypot(q.left + q.width / 2 - cx, q.top + q.height / 2 - cy) < 2 * R) return true
+  }
+  return false
+}
+function a11yIssues(el: HTMLElement): Issue[] {
+  const out: Issue[] = [], tag = el.tagName, role = el.getAttribute('role')
+  const add = (sev: Issue['sev'], rule: string, msg: string, fix?: Issue['fix']) => out.push({ el, sev, rule, msg, fix })
+  if (tag === 'IMG' && !el.hasAttribute('alt')) add('error', 'alt', 'Image has no alt text. Describe it, or use alt="" if it’s decorative.')
+  const control = tag === 'BUTTON' || (tag === 'A' && el.hasAttribute('href')) || role === 'button' || role === 'link'
+  if (control && !accessibleName(el)) add('error', 'name', `${tag === 'A' || role === 'link' ? 'Link' : 'Button'} has no accessible name. Add text or an aria-label.`)
+  const field = (tag === 'INPUT' && !/^(hidden|submit|button|reset|image)$/.test((el as HTMLInputElement).type)) || tag === 'SELECT' || tag === 'TEXTAREA'
+  if (field && !((el as HTMLInputElement).labels?.length || el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || el.title)) {
+    const ph = el.getAttribute('placeholder')
+    add(ph ? 'warn' : 'error', 'label', ph ? 'Only a placeholder labels this field, and it disappears once someone types.' : 'Form field has no label.')
+  }
+  // WCAG 2.5.8: 24×24 minimum, except links inside running text
+  const inline = tag === 'A' && !!el.parentElement && hasText(el.parentElement)
+  if ((control || field) && !inline) {
+    const r = el.getBoundingClientRect(), z = ctxOf(el).z, w = r.width / z, h = r.height / z
+    if (w && h && (w < 24 || h < 24) && crowded(el, r, z)) add('warn', 'target', `Target is ${round(w)}×${round(h)}px with others close by; make it at least 24×24 or space it out.`)
+  }
+  const ti = el.getAttribute('tabindex')
+  if (ti && +ti > 0) add('warn', 'tabindex', `tabindex="${ti}" reorders keyboard focus; use 0 and order the DOM instead.`)
+  if (el.matches(FOCUSABLE) && el.closest('[aria-hidden="true"]')) add('error', 'hidden-focus', 'Focusable inside aria-hidden="true": keyboard users reach it, screen readers can’t see it.')
+  const c = textContrast(el)
+  if (c && c.ratio < c.aa) add('error', 'contrast', `Contrast ${round(c.ratio, 2)}:1, AA needs ${c.aa}:1.`, contrastFix(el, c))
+  return out
+}
+function pageIssues(): Issue[] {
+  const out: Issue[] = []
+  if (!document.documentElement.lang) out.push({ el: null, sev: 'error', rule: 'lang', msg: '<html> has no lang attribute, so screen readers guess the language.' })
+  if (!document.title.trim()) out.push({ el: null, sev: 'error', rule: 'title', msg: 'The page has no <title>.' })
+  const hs = [...document.body.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6')].filter(h => h.checkVisibility?.() ?? true)
+  if (hs.length && !hs.some(h => h.tagName === 'H1')) out.push({ el: hs[0], sev: 'warn', rule: 'heading', msg: 'No <h1> on this page.' })
+  let prev = 0
+  for (const h of hs) {
+    const lvl = +h.tagName[1]
+    if (prev && lvl > prev + 1) out.push({ el: h, sev: 'warn', rule: 'heading', msg: `<${h.tagName.toLowerCase()}> comes after <h${prev}>, skipping a level.` })
+    prev = lvl
+  }
+  return out
+}
+const SPACING_PROPS = ['padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'margin-top', 'margin-bottom']
+/** Values on `el` that aren't one of the app's tokens (inherited text colour and size are the parent's business). */
+function tokenIssues(el: HTMLElement): Issue[] {
+  const T = themeTokens(), cs = getComputedStyle(el), out: Issue[] = []
+  const parent = el.parentElement && getComputedStyle(el.parentElement)
+  const own = (p: string) => !parent || parent.getPropertyValue(p) !== cs.getPropertyValue(p)
+  const flag = (prop: string, shown: string, fix?: { to: string; label: string }) => out.push({
+    el, sev: 'warn', rule: 'token', key: `${prop}|${shown}`, msg: `${prop} ${shown} isn’t a token`,
+    fix: fix && { label: fix.label, run: () => editStyle(el, prop, fix.to) },
+  })
+  const color = (read: string, prop: string, when = true) => {
+    if (!when || !T.colors.length) return
+    const v = cs.getPropertyValue(read), c = rgbOf(v)
+    if (!c.a) return
+    const n = nearestColor(c, T.colors)
+    if (!n?.exact) flag(prop, colorOut(v), n?.close ? { to: `var(${n.token.name})`, label: n.token.name } : undefined)
+  }
+  color('color', 'color', hasText(el) && own('color'))
+  color('background-color', 'background-color')
+  color('border-top-color', 'border-color', parseFloat(cs.borderTopWidth) > 0 && cs.borderTopStyle !== 'none')
+  const len = (read: string, prop: string, list: Token[], step?: number, when = true) => {
+    if (!when || (!list.length && !step)) return
+    const px = parseFloat(cs.getPropertyValue(read))
+    if (!px) return
+    const n = nearestLength(px, list, step)
+    if (n && !n.exact) flag(prop, `${round(px)}px`, !n.close ? undefined : n.token ? { to: `var(${n.token.name})`, label: n.token.name } : { to: `${n.value}px`, label: `${n.value}px` })
+  }
+  len('font-size', 'font-size', T.sizes, undefined, hasText(el) && own('font-size'))
+  len('border-top-left-radius', 'border-radius', T.radii)
+  for (const p of SPACING_PROPS) len(p, p, T.spaces, T.step)
+  if (/flex|grid/.test(cs.display)) len('column-gap', 'gap', T.spaces, T.step)
+  return out
+}
+function audit() {
+  tokCache = null
+  const a11y = pageIssues(), tokens: Issue[] = []
+  for (const el of document.body.querySelectorAll<HTMLElement>('*')) {
+    if (SKIP.has(el.tagName) || !(el.checkVisibility?.() ?? true)) continue
+    a11y.push(...a11yIssues(el)); tokens.push(...tokenIssues(el))
+  }
+  return { a11y, tokens }
 }
 
 const byCount = (t: Tally) => [...t].sort((a, b) => b[1] - a[1])
@@ -1952,8 +2188,8 @@ function pendingEdits() {
       else if (p[0] === '%') {
         const f = hist.filter(h => h.el === el && h.prop === p).at(-1)?.fiber
         if (f) { if (!comp.has(f)) comp.set(f, {}); comp.get(f)![p.slice(1)] = currentProps(f)[p.slice(1)] ?? null }
-      } else if (isStateKey(p)) { const i = p.indexOf(':'), v = getStateRule(el, p); if (v) (inState[p.slice(0, i)] ??= {})[p.slice(i + 1)] = hex(v) }
-      else if (p[0] !== '#') { const v = el.style.getPropertyValue(p); if (v) styles[p] = hex(v) }
+      } else if (isStateKey(p)) { const i = p.indexOf(':'), v = getStateRule(el, p), css = p.slice(i + 1); if (v) (inState[p.slice(0, i)] ??= {})[css] = tokenRef(css, v) ?? hex(v) }
+      else if (p[0] !== '#') { const v = el.style.getPropertyValue(p); if (v) styles[p] = tokenRef(p, v) ?? hex(v) }
     }
     // props are written where the component is used, not inside it
     for (const [f, vals] of comp) {
@@ -2397,7 +2633,7 @@ function Overlay() {
   const [guides, setGuides] = useState<Guide[]>([])
   const [dragging, setDragging] = useState<number | null>(null)
   const [show, setShow] = useState({ rulers: true, layers: true, inspector: true })
-  const [right, setRight] = useState<'inspect' | 'ds' | 'perf' | 'code'>('inspect')
+  const [right, setRight] = useState<'inspect' | 'ds' | 'perf' | 'code' | 'checks'>('inspect')
   const [grid, setGrid] = useState(false)
   const [filter, setFilter] = useState('')
   const [settings, setSettings] = useState(false)
@@ -3187,6 +3423,7 @@ function Overlay() {
         <button className={'b' + (xray ? ' on' : '')} data-tip="X-ray · X" onClick={() => setXray(v => !v)}><Icon d={P.xray} /></button>
         <button className={'b' + (right === 'ds' ? ' tg' : '')} data-tip="Design system" onClick={() => { setRight(r => (r === 'ds' ? 'inspect' : 'ds')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.palette} /></button>
         <button className={'b' + (right === 'perf' ? ' tg' : '')} data-tip="Profiler" onClick={() => { setRight(r => (r === 'perf' ? 'inspect' : 'perf')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.pulse} /></button>
+        <button className={'b' + (right === 'checks' ? ' tg' : '')} data-tip="Checks: tokens & accessibility" onClick={() => { setRight(r => (r === 'checks' ? 'inspect' : 'checks')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.shield} /></button>
         <button className={'b' + (resp ? ' on' : '')} data-tip="Responsive · ⇧V" onClick={() => { closeSvgEditor(); setResp(r => (r ? null : DEFAULT_RESP)) }}><Icon d={P.devices} /></button>
         <i className="sep" />
         <button className={'b' + (right === 'code' ? ' tg' : '')} data-tip="Apply to code" onClick={() => { setRight(r => (r === 'code' ? 'inspect' : 'code')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.code} /></button>
@@ -3227,6 +3464,7 @@ function Overlay() {
             : right === 'ds' ? <><PanelHead title="Design system" icon={P.palette} onClose={() => setRight('inspect')} /><DesignSystem /></>
             : right === 'perf' ? <><PanelHead title="Profiler" icon={P.pulse} onClose={() => setRight('inspect')} /><Profiler /></>
             : right === 'code' ? <><PanelHead title="Apply to code" icon={P.code} onClose={() => setRight('inspect')} /><CodePanel rev={rev} /></>
+            : right === 'checks' ? <><PanelHead title="Checks" icon={P.shield} onClose={() => setRight('inspect')} /><ChecksPanel rev={rev} select={select} /></>
             : <Inspector el={sel} rev={rev} select={select} guide={guides.find(g => g.id === selGuide) ?? null}
               updateGuide={updateGuide} removeGuide={removeGuide} theme={theme} setTheme={setTheme} onClose={closeInspector} onCode={openCode} />}
         </div>
@@ -3375,6 +3613,21 @@ const CSS_TEXT = `
 .launch { all: unset; position: absolute; right: 16px; bottom: 16px; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--surface); color: var(--text); box-shadow: var(--shadow-raised); cursor: pointer; }
 .launch:hover { box-shadow: var(--shadow-raised), 0 0 0 2px var(--primary); }
 .stbar { margin: 2px 0 10px; }
+.ck { display: flex; align-items: center; gap: 7px; padding: 5px 0; font-size: 11.5px; line-height: 1.35; color: var(--text-muted); }
+.ck + .ck { border-top: 1px solid var(--border-soft); }
+.ck > svg { flex: none; }
+.ck.error > svg { color: oklch(62% .21 25); }
+.ck.warn > svg { color: oklch(74% .16 75); }
+.ck.ok .ckmsg b { color: oklch(56% .15 150); }
+.ck.error .ckmsg > b:first-child { color: oklch(58% .21 25); }
+.ckmsg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ckmsg em { font-style: normal; color: var(--text-x); }
+.ckmsg[role=button] { cursor: pointer; }
+.ckmsg[role=button]:hover { color: var(--text); }
+.ckfix { flex: none; max-width: 112px; padding: 0 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10.5px; color: var(--primary); box-shadow: inset 0 0 0 1px var(--border); }
+.ckfix:hover { background: var(--bg-hover); }
+.ckswatch { flex: none; width: 28px; height: 20px; border-radius: 5px; display: grid; place-items: center; font-weight: 700; font-size: 11px; box-shadow: inset 0 0 0 1px var(--border); }
+.pb .sec .ck:first-child { padding-top: 0; }
 .scut { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
 .scut .pc { gap: 4px; }
 .kbtn { flex: 1; min-width: 0; font-family: var(--mono); justify-content: center; }

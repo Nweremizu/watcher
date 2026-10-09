@@ -37,8 +37,9 @@ const NONCOLOR: Record<string, Set<string>> = {
 const colorFamily = (prefix: string) => (cls: string) => {
   if (!cls.startsWith(prefix + '-')) return false
   const rest = cls.slice(prefix.length + 1)
-  if (rest.startsWith('[')) return /^\[(#|rgb|hsl|oklch|oklab|lab\(|lch|color\(|var\(--color)/.test(rest)
-  return /^[a-z]+(-\d{2,3})?(\/\d+)?$/.test(rest) && !NONCOLOR[prefix].has(rest.split('-')[0]) && !/^\d?xl$/.test(rest)
+  if (rest.startsWith('[')) return /^\[(#|rgb|hsl|oklch|oklab|lab\(|lch|color\(|var\(--)/.test(rest)
+  if (rest.startsWith('(')) return !rest.startsWith('(length:') // text-(--brand); text-(length:--x) is a size
+  return /^[a-z]+(-[a-z]+)*(-\d{2,3})?(\/\d+)?$/.test(rest) && !NONCOLOR[prefix].has(rest.split('-')[0]) && !/^\d?xl$/.test(rest)
 }
 const color = (prefix: string): Rule => ({
   cls: v => (v === 'transparent' ? `${prefix}-transparent` : `${prefix}-${arb(v)}`),
@@ -66,16 +67,16 @@ const RULES: Record<string, Rule> = {
   'max-width': { cls: v => (v === 'none' ? 'max-w-none' : size('max-w', v)), family: re(/^max-w-/) },
   'font-size': {
     cls: v => { const n = px(v); return n !== null && FONT[n] ? `text-${FONT[n]}` : `text-${arb(v)}` },
-    family: re(/^text-(xs|sm|base|lg|[2-9]?xl|\[-?\d*\.?\d+(px|rem|em)\])$/),
+    family: re(/^text-(xs|sm|base|lg|[2-9]?xl|\[-?\d*\.?\d+(px|rem|em)\]|\(length:--[\w-]+\)|\[length:var\(--[\w-]+\)\])$/),
   },
-  'font-weight': { cls: v => `font-${WEIGHT[v.trim()] ?? arb(v)}`, family: re(/^font-(thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[\d+\])$/) },
+  'font-weight': { cls: v => `font-${WEIGHT[v.trim()] ?? arb(v)}`, family: re(/^font-(thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[\d+\]|\(--[\w-]+\)|\[var\(--[\w-]+\)\])$/) },
   'line-height': { cls: v => (v === 'normal' ? 'leading-normal' : `leading-${arb(v)}`), family: re(/^leading-/) },
   'letter-spacing': { cls: v => (v === 'normal' ? 'tracking-normal' : `tracking-${arb(v)}`), family: re(/^tracking-/) },
   'text-align': keyword({ start: 'text-start', left: 'text-left', center: 'text-center', right: 'text-right', justify: 'text-justify', end: 'text-end' }, /^text-(left|center|right|justify|start|end)$/),
   color: color('text'), 'background-color': color('bg'), 'border-color': color('border'),
   'border-radius': {
     cls: v => { const n = px(v); if (v.trim() === '9999px' || v.trim() === '50%') return 'rounded-full'; return n !== null && RADIUS[n] ? `rounded-${RADIUS[n]}` : `rounded-${arb(v)}` },
-    family: re(/^rounded(-(none|xs|sm|md|lg|[2-4]?xl|full|\[[^\]]+\]))?$/),
+    family: re(/^rounded(-(none|xs|sm|md|lg|[2-4]?xl|full|\[[^\]]+\]|\([^)]+\)))?$/),
   },
   'border-width': {
     cls: v => { const n = px(v); return n === 0 ? 'border-0' : n === 1 ? 'border' : n !== null && [2, 4, 8].includes(n) ? `border-${n}` : `border-${arb(v)}` },
@@ -110,9 +111,31 @@ const WHY: Record<string, string> = {
   left: 'canvas-mode position', top: 'canvas-mode position', right: 'canvas-mode position', bottom: 'canvas-mode position',
 }
 
+// design tokens: var(--color-brand) → text-brand (a theme variable has a named utility), var(--brand) → text-(--brand)
+const SPACE: Record<string, string> = {
+  'padding-top': 'pt', 'padding-right': 'pr', 'padding-bottom': 'pb', 'padding-left': 'pl', padding: 'p',
+  'margin-top': 'mt', 'margin-right': 'mr', 'margin-bottom': 'mb', 'margin-left': 'ml', margin: 'm', gap: 'gap', 'row-gap': 'gap-y', 'column-gap': 'gap-x',
+}
+const TOKEN: Record<string, [prefix: string, namespace: string, hint?: string]> = {
+  color: ['text', 'color'], 'background-color': ['bg', 'color'], 'border-color': ['border', 'color'],
+  'font-size': ['text', 'text', 'length'], 'font-weight': ['font', 'font-weight'], 'line-height': ['leading', 'leading'],
+  'letter-spacing': ['tracking', 'tracking'], 'border-radius': ['rounded', 'radius'], 'box-shadow': ['shadow', 'shadow'],
+  ...Object.fromEntries(Object.entries(SPACE).map(([p, pre]) => [p, [pre, 'spacing']])),
+}
+function tokenClass(prop: string, name: string, ver: TwVersion) {
+  const t = TOKEN[prop]
+  if (!t) return null
+  const [prefix, ns, hint] = t
+  const named = new RegExp(`^--${ns}-([\\w-]+)$`).exec(name)?.[1]
+  if (ver === 4 && named && !named.includes('--')) return `${prefix}-${named}`
+  return ver === 4 ? `${prefix}-(${hint ? hint + ':' : ''}${name})` : `${prefix}-[${hint ? hint + ':' : ''}var(${name})]`
+}
+
 export function cssToTailwind(prop: string, value: string, ver: TwVersion = 4): { cls: string } | { reason: string } {
   const rule = RULES[prop]
   if (!rule) return { reason: WHY[prop] ?? `no Tailwind mapping for ${prop}` }
+  const v = /^var\((--[\w-]+)\)$/.exec(value.trim())
+  if (v) { const cls = tokenClass(prop, v[1], ver); return cls ? { cls } : { reason: `no token utility for ${prop}` } }
   const cls = rule.cls(value, ver)
   return cls ? { cls } : { reason: `can't express ${prop}: ${value} as a utility` }
 }
@@ -125,8 +148,9 @@ export function mergeClasses(className: string, styles: Record<string, string>, 
     const r = cssToTailwind(prop, value, ver)
     if ('reason' in r) { skipped.push({ prop, value, reason: r.reason }); continue }
     const family = RULES[prop].family
-    // only touch classes with exactly this variant (keep hover:, md: etc. when editing the base, and vice versa)
-    tokens = tokens.filter(t => !(t.startsWith(variant) && !t.slice(variant.length).includes(':') && family(t.slice(variant.length))))
+    // only touch classes with exactly this variant (keep hover:, md: etc. when editing the base, and vice versa);
+    // a variant's colon comes before any bracket, so text-(length:--x) and bg-[url(a:b)] have none
+    tokens = tokens.filter(t => !(t.startsWith(variant) && !/^[^[(]*:/.test(t.slice(variant.length)) && family(t.slice(variant.length))))
     tokens.push(variant + r.cls)
     mapped.push({ prop, value, cls: variant + r.cls })
   }

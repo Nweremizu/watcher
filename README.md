@@ -13,7 +13,7 @@ Rulers and guides, live style editing, a free canvas, an SVG editor, design-syst
 - [Keyboard shortcut](#keyboard-shortcut): changing the key, and how to write any key
 - [Options](#options)
 - [Write edits back to your code](#write-edits-back-to-your-code-tailwind)
-- [Component props](#component-props) · [Forced states](#forced-states) · [Sessions](#sessions)
+- [Component props](#component-props) · [Forced states](#forced-states) · [Checks: tokens & accessibility](#checks-tokens--accessibility) · [Sessions](#sessions)
 - [What it costs your app](#what-it-costs-your-app) · [Features](#features)
 
 ## Getting started
@@ -211,6 +211,44 @@ Live editing uses React's DevTools hook, which the Vite plugin installs before R
 
 The **Default · Hover · Focus · Active** bar at the top of the inspector shows the selected element in that state. This works with your real CSS, including Tailwind `hover:` and `group-hover:`, because Watcher mirrors each rule that uses a state onto an attribute it can toggle. Hover and active also apply to ancestors, and focus gives ancestors `focus-within`, just as a real pointer would. While a state is showing, inspector edits apply only to that state and are written as `hover:` / `focus:` / `active:` classes, combined with the breakpoint when made in a responsive preview (`md:hover:…`).
 
+## Checks: tokens & accessibility
+
+Watcher checks the page against your design tokens and the common WCAG rules. It runs in two places:
+
+- **The inspector's Checks section** checks the selected element and updates as you edit. It shows the text contrast, with a swatch and the ratio, plus any problems.
+- **The Checks panel** (the shield in the toolbar) checks the whole page. It has an **Accessibility** tab and a **Tokens** tab. Click a finding to select the element.
+
+Most findings come with a one-click fix. Fixes are ordinary edits: you can undo them, they're saved with your session, and they go through **Apply to code**.
+
+**Design tokens** are the CSS variables declared on `:root`, which is where Tailwind v4's theme puts them. Watcher sorts them by name:
+
+| Token | Used for |
+|---|---|
+| any variable holding a colour | text, background and border colours |
+| `--text-*`, `--font-size*` | font sizes |
+| names containing `radius` | corner radius |
+| `--spacing` (Tailwind's 4px step) and `--spacing-*`, `--space-*`, `--gap-*` | padding, vertical margins and gaps. Multiples of the step are on the scale, plus half steps below 16px (`p-1.5`) |
+
+A value that isn't a token is flagged. The fix offers the nearest token, but only when it's a small nudge: Watcher won't suggest turning 48px into an 18px token. Inherited text colours and sizes aren't counted against the child. With **Snap all** in the Tokens tab you can fix every element using the same stray value at once.
+
+**Writing tokens back:** a value that *equals* a token is written as that token's utility, not as an arbitrary value. Theme variables get their named class (`var(--color-brand)` becomes `text-brand`, and `--radius-card` becomes `rounded-card`). Other variables use the shorthand (`text-(--brand)`, or `text-[var(--brand)]` on Tailwind v3).
+
+**Accessibility checks:**
+
+| Check | Severity | Rule |
+|---|---|---|
+| Text contrast below 4.5:1, or 3:1 for large text (24px, or 18.66px bold) | error | WCAG 1.4.3 |
+| Image without `alt` | error | 1.1.1 |
+| Button or link with no accessible name | error | 4.1.2 |
+| Form field with no label (a placeholder alone is a warning) | error | 1.3.1, 3.3.2 |
+| Focusable element inside `aria-hidden="true"` | error | 4.1.2 |
+| `<html>` without `lang`, page without `<title>` | error | 3.1.1, 2.4.2 |
+| Target smaller than 24×24 with another target within 12px (links in running text are exempt) | warning | 2.5.8 |
+| Heading levels skipped, or no `<h1>` | warning | 1.3.1 |
+| Positive `tabindex` | warning | 2.4.3 |
+
+The contrast fix suggests a passing token if one is close. Otherwise it suggests the nearest colour of the same hue that passes. Contrast is measured against the backgrounds of the element and its ancestors. When there's a background image or gradient behind the text, it isn't measured, because Watcher can't know which pixels sit behind the text. These checks catch the common, mechanical problems. They don't replace testing with a screen reader and a keyboard.
+
 ## Sessions
 
 Edits you haven't applied yet, added elements, guides and canvas mode are saved in your browser, per page, and come back when you reload. A toast says how many were restored, with **Discard** to drop them. The launcher shows a dot when a page has saved work. Applying edits to code or undoing them removes them from the session. Turn it off under Settings → *Remember edits across reloads*.
@@ -220,7 +258,7 @@ Edits you haven't applied yet, added elements, guides and canvas mode are saved 
 | | |
 |---|---|
 | **Production** | 0 bytes with Vite and webpack: the package's `production` export condition resolves to an empty module. Other bundlers still emit the lazy chunk, but a `NODE_ENV` check means it never loads. |
-| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~60 kB chunk, fetched when the browser is idle so it never competes with your first render. |
+| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~80 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
 | **Open** | It runs in its own shadow root and React root, so your app's CSS can't reach it and it never re-renders your tree. It redraws only when something it shows actually moved. |
 
 ## Features
@@ -243,7 +281,7 @@ Edits preview live on the page. They're kept per page until you apply or discard
 
 ```bash
 npm run dev     # demo app at http://localhost:5179, using src/ directly
-npm run check   # type-check + path, write-back and shortcut checks
+npm run check   # type-check + path, write-back, shortcut and guard checks
 npm run build   # dist/: entry, production no-op, lazy overlay chunk, types
 npm run icons   # pull the latest Framework7 Icons and regenerate src/icons.ts
 ```

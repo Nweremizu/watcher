@@ -10,7 +10,8 @@ import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { parsePath, serializePath, splitSeg, bezAt, shapeD, type PNode, type Sub } from './path'
 import { ICONS, ICON_VIEWBOX } from './icons'
-import { forceSelectors, hasState } from './states'
+import { forceSelectors, hasState, muteSelectors } from './states'
+import * as A from './anim'
 import { contrast, contrastNeed, deltaE, fixContrast, isLargeText, nearestColor, nearestLength, over, toHex, type RGB, type Token } from './guard'
 import { DEFAULT_SHORTCUT, matchesShortcut, parseShortcut, shortcutFromEvent, shortcutLabel, stringifyShortcut, type Shortcut } from './shortcut'
 
@@ -118,6 +119,7 @@ function frame(mode: 'fit' | 'actual') {
   const pageW = document.documentElement.clientWidth
   const ax = lay.l + RULER + 32, ay = lay.t + RULER + 40, avail = innerWidth - lay.r - ax - 32
   const z = mode === 'fit' ? Math.min(1, avail / pageW) : 1
+  if (!(z > 0) || !Number.isFinite(z)) return // a 0×0 window (mid-reload, a hidden tab): keep the last good zoom
   const left = ax + Math.max(0, (avail - pageW * z) / 2)
   // <body> scales about its own top-left, which sits at its margin, so page x=0 lands at body.left - margin·z
   vp.z = z
@@ -303,11 +305,23 @@ function stateCss(rules: CSSRuleList): string {
   }
   return out
 }
+const mirrorCache = new WeakMap<Document, { sig: string; at: number; css: string; applied: string }>()
 function applyStates(doc: Document) {
   const s = sheetsOf(doc)
   let css = ''
-  if ([...forced.keys()].some(el => el.ownerDocument === doc)) for (const sh of doc.styleSheets) { try { css += stateCss(sh.cssRules) } catch { /* cross-origin sheet */ } }
-  try { s.mirror.replaceSync(forceSelectors(css)) } catch { /* leave the previous mirror */ }
+  const c = mirrorCache.get(doc)
+  if ([...forced.keys()].some(el => el.ownerDocument === doc)) {
+    // the scan reads every rule's text: reuse it while the stylesheets look the same (and for at most 2s)
+    const sig = `${doc.styleSheets.length}:${[...doc.styleSheets].reduce((n, sh) => { try { return n + sh.cssRules.length } catch { return n } }, 0)}`
+    if (c && c.sig === sig && performance.now() - c.at < 2000) css = c.css
+    else { for (const sh of doc.styleSheets) { try { css += stateCss(sh.cssRules) } catch { /* cross-origin sheet */ } } }
+    mirrorCache.set(doc, { sig, at: c && c.sig === sig && c.css === css ? c.at : performance.now(), css, applied: c?.applied ?? '' })
+  }
+  const text = forceSelectors(css), entry = mirrorCache.get(doc)
+  if (!entry || entry.applied !== text) {
+    try { s.mirror.replaceSync(text) } catch { /* leave the previous mirror */ }
+    if (entry) entry.applied = text; else mirrorCache.set(doc, { sig: '', at: 0, css: '', applied: text })
+  }
   for (const e of doc.querySelectorAll('[data-wforce]')) e.removeAttribute('data-wforce')
   const add = (e: Element, t: string) => e.setAttribute('data-wforce', ((e.getAttribute('data-wforce') ?? '') + ' ' + t).trim())
   for (const [el, st] of forced) {
@@ -1099,7 +1113,7 @@ const Check = ({ checked, onChange, children }: { checked: boolean; onChange: (v
     <span className="cb"><Icon d={P.check} size={12} /></span>{children}
   </label>
 )
-const collapsed = new Set<string>()
+const collapsed = new Set<string>(['Fine-tune']) // raw controls start closed; the Animations list comes first
 /** Collapsible section; collapsed state survives re-selection. */
 function Section({ title, n, children }: { title: string; n?: number; children: ReactNode }) {
   const [open, setOpen] = useState(!collapsed.has(title))
@@ -1485,68 +1499,6 @@ function KeyframeEditor({ el, name }: { el: HTMLElement; name: string }) {
 }
 
 // ── presets: add an animation, previewed on the element, written as Motion props or Tailwind classes ──
-type Preset = { id: string; label: string; hint: string; motion: Vals; tw: string[]; frames: Keyframe[]; spring?: boolean; ms: number }
-const SPRING_IN = { type: 'spring', visualDuration: 0.3, bounce: 0 } // settles without a wobble
-const PRESETS: Preset[] = [
-  { id: 'fade', label: 'Fade in', hint: 'opacity, 300ms ease-out', ms: 300, motion: { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { duration: 0.3, ease: 'easeOut' } }, tw: ['transition-opacity', 'duration-300', 'ease-out', 'starting:opacity-0'], frames: [{ opacity: 0 }, { opacity: 1 }] },
-  { id: 'slide', label: 'Slide up', hint: '8px up while fading in', ms: 300, spring: true, motion: { initial: { opacity: 0, y: 8 }, animate: { opacity: 1, y: 0 }, transition: SPRING_IN }, tw: ['transition-[opacity,translate]', 'duration-300', 'ease-out', 'starting:opacity-0', 'starting:translate-y-2'], frames: [{ opacity: 0, translate: '0 8px' }, { opacity: 1, translate: '0 0' }] },
-  { id: 'scale', label: 'Scale in', hint: 'from 95% while fading in', ms: 300, spring: true, motion: { initial: { opacity: 0, scale: 0.95 }, animate: { opacity: 1, scale: 1 }, transition: SPRING_IN }, tw: ['transition-[opacity,scale]', 'duration-300', 'ease-out', 'starting:opacity-0', 'starting:scale-95'], frames: [{ opacity: 0, scale: '0.95' }, { opacity: 1, scale: '1' }] },
-  { id: 'press', label: 'Press', hint: 'scale 0.96 while pressed', ms: 360, motion: { whileTap: { scale: 0.96 } }, tw: ['transition-transform', 'duration-150', 'ease-out', 'active:scale-[0.96]'], frames: [{ scale: '1' }, { scale: '0.96', offset: 0.4 }, { scale: '1' }] },
-  { id: 'lift', label: 'Hover lift', hint: '2px up on hover', ms: 600, motion: { whileHover: { y: -2 } }, tw: ['transition-transform', 'duration-150', 'ease-out', 'hover:-translate-y-0.5'], frames: [{ translate: '0 0' }, { translate: '0 -2px', offset: 0.35 }, { translate: '0 -2px', offset: 0.65 }, { translate: '0 0' }] },
-]
-/** Motion's spring as a CSS linear() easing, so a preview moves the way the real spring will. */
-function springEasing(t: Vals) {
-  const { pts, settle } = springCurve(t)
-  const end = pts.at(-1)?.[0] ?? 1
-  return { easing: `linear(${pts.filter((_, i) => i % 3 === 0).map(([s, x]) => `${round(x, 3)} ${round((s / end) * 100, 1)}%`).join(', ')}, 1 100%)`, ms: Math.max(200, settle * 1000) }
-}
-/** Nested objects as dotted leaves: { initial: { y: 8 } } → { 'initial.y': 8 } */
-const flatten = (v: Vals, at = ''): Vals => Object.fromEntries(Object.entries(v).flatMap(([k, x]) => (isObj(x) ? Object.entries(flatten(x, `${at}${k}.`)) : [[`${at}${k}`, x]])))
-const jsLike = (v: unknown) => toJson(v).replace(/"(\w+)":/g, '$1: ').replace(/,(?=\S)/g, ', ').replace(/^\{/, '{ ').replace(/\}$/, ' }')
-function AddAnimation({ el }: { el: HTMLElement }) {
-  const info = useServerInfo()
-  const [pick, setPick] = useState<string | null>(null), [mode, setMode] = useState<'motion' | 'tailwind' | null>(null), [busy, setBusy] = useState(false)
-  const src = sourceOf(el), mf = motionFiber(el)
-  if (info === undefined) return null
-  const out = mode ?? (info?.motion || mf ? 'motion' : 'tailwind')
-  const p = PRESETS.find(x => x.id === pick)
-  const preview = (x: Preset) => {
-    setPick(x.id)
-    const sp = x.spring && out === 'motion' ? springEasing(SPRING_IN) : null
-    const a = el.animate(x.frames, { duration: sp?.ms ?? x.ms, easing: sp?.easing ?? 'cubic-bezier(0, 0, 0.2, 1)' })
-    a.updatePlaybackRate(rec.rate)
-  }
-  const add = async () => {
-    if (!p || !src || !info) return
-    setBusy(true)
-    try {
-      const edit = out === 'motion' ? { props: flatten(p.motion), motion: mf ? undefined : info.motion ?? 'motion/react' } : { classes: p.tw }
-      const res = await postApply([{ els: [el], file: src.file, loc: src.loc, line: src.line, styles: {}, variant: '', repeats: 1, ...edit }], false)
-      const r = res.files[0]?.results[0]
-      if (r?.ok && !r.skipped.length) notify(`Added “${p.label}” to ${src.file.split('/').pop()}:${src.line}. Your editor’s undo takes it back.`)
-      else notify(`Couldn’t add it: ${r?.error ?? r?.skipped[0]?.reason ?? res.error ?? 'unknown error'}`)
-    } catch (e) { notify(`Couldn’t add it: ${(e as Error).message}`) }
-    setBusy(false)
-  }
-  const repeats = src ? el.ownerDocument.querySelectorAll(`[data-wsrc="${el.getAttribute('data-wsrc')!.replace(/"/g, '\\"')}"]`).length : 0
-  const tag = mf ? typeName(mf.type)! : `motion.${el.tagName.toLowerCase()}`
-  return (
-    <Section title="Add animation">
-      {!info ? <p className="empty">Add the <code>watcher-ui/vite</code> plugin to add animations to your code.</p>
-        : !src ? <p className="empty">This element isn’t in your source (a library component, or added in canvas mode).</p>
-        : <>
-          {(info.motion || mf) && <Seg value={out} options={[['motion', 'Motion'], ['tailwind', 'Tailwind']] as const} onChange={setMode} />}
-          <div className="presets">{PRESETS.map(x => <button key={x.id} className={'preset' + (pick === x.id ? ' on' : '')} onClick={() => preview(x)}><b>{x.label}</b><span>{x.hint}</span></button>)}</div>
-          {p && <>
-            <pre className="pcode">{out === 'motion' ? `<${tag} ${Object.entries(p.motion).map(([k, v]) => `${k}={${jsLike(v)}}`).join(' ')}>` : p.tw.join(' ')}</pre>
-            {out === 'tailwind' && /^(fade|slide|scale)$/.test(p.id) && <p className="stnote">Plays when the element appears, using CSS <code>@starting-style</code> (Tailwind’s <code>starting:</code>).</p>}
-            {repeats > 1 && <p className="cwarn">This line renders {repeats} elements; all of them get it.</p>}
-            <button className="b sm apply addanim" disabled={busy} onClick={() => void add()}><Icon d={P.code} size={14} />{busy ? 'Adding…' : 'Add to code'}</button>
-          </>}
-        </>}
-    </Section>
-  )
-}
 /** One state's values (opacity, x, scale…): numbers scrub, strings type, add or remove a key. */
 function MotionValues({ values, set }: { values: Vals; set: (k: string, v: unknown) => void }) {
   const [k, setK] = useState(''), [v, setV] = useState('')
@@ -1577,7 +1529,7 @@ const MOTION_EASES: Record<string, Bez | null> = {
 }
 const easeCss = (e: unknown) => (Array.isArray(e) && e.length === 4 ? bezText(e as number[]) : typeof e === 'string' && MOTION_EASES[e] ? bezText(MOTION_EASES[e]!) : String(e ?? 'easeOut'))
 function SpringPreview({ t }: { t: Vals }) {
-  const { pts, settle, approx } = springCurve(t)
+  const { pts, settle, approx } = A.springCurve(t)
   const maxT = pts.at(-1)?.[0] || 1, hi = Math.max(1.1, ...pts.map(p => p[1])), lo = Math.min(0, ...pts.map(p => p[1]))
   const X = (s: number) => 8 + (s / maxT) * 184, Y = (x: number) => 72 - ((x - lo) / (hi - lo)) * 60
   return (
@@ -1691,7 +1643,274 @@ function MotionSection({ el, f }: { el: HTMLElement; f: Fiber }) {
   )
 }
 
-function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement | null) => void }) {
+// ── custom animations: the list of what the element does, and a builder to make or change one ──
+type Draft = { anim: A.Anim; system: System; found?: Found; name: string }
+type SavedPreset = { name: string; anim: A.Anim }
+let presetsP: Promise<SavedPreset[]> | null = null
+const loadPresets = () => (presetsP ??= fetch('/__watcher/presets').then(r => (r.ok ? r.json() : { presets: [] })).then(j => (Array.isArray(j.presets) ? j.presets : [])
+  .map((p: { name?: unknown; anim?: unknown }) => ({ name: String(p.name ?? ''), anim: A.sanitizeAnim(fromJson(toJson(p.anim ?? null))) })).filter((p: { anim: A.Anim | null }) => p.anim) as SavedPreset[]).catch(() => []))
+async function savePresets(list: SavedPreset[]) {
+  const r = await fetch('/__watcher/presets', { method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' }, body: toJson({ presets: list }) })
+  const j = await r.json()
+  if (j.error) throw new Error(j.error)
+  presetsP = Promise.resolve(list)
+}
+const SYSTEM_LABEL: Record<System, string> = { motion: 'Motion', tailwind: 'Tailwind', css: 'CSS' }
+const BLANK: A.Anim = { trigger: 'hover', frames: A.fromTo({}, {}), transition: { duration: 0.2, ease: [0, 0, 0.2, 1] } }
+const COMMON_KEYS = ['opacity', 'x', 'y', 'scale', 'rotate', 'filter', 'backgroundColor', 'color', 'boxShadow', 'borderRadius']
+const KEY_START: A.Values = { opacity: 0, x: 0, y: 8, scale: 0.95, rotate: 0, filter: 'blur(4px)', backgroundColor: '#ffffff', color: '#000000', boxShadow: '0 8px 24px rgba(0,0,0,.12)', borderRadius: '8px' }
+const restOf = (el: HTMLElement): A.Values => { const sn = snap(el); return Object.assign({}, ...Object.entries(sn).filter(([p]) => p !== 'animation-name' && p !== 'transform').map(([p, v]) => A.cssToValues(p, v))) }
+const isGesture = (t: A.Trigger) => t === 'hover' || t === 'press' || t === 'focus'
+/** What the Tailwind writer needs to know about the element besides the animation. */
+function twContext(el: HTMLElement, d: Draft, founds: Found[], info: ServerInfo | null, name?: string): A.TwContext {
+  const model = A.classifyTailwind(el.getAttribute('class') ?? '')
+  const css = founds.filter(o => o.system !== 'motion' && !o.kfName)
+  return {
+    ver: info?.tailwind === 3 ? 3 : 4, timing: model.timing,
+    current: (d.found && !d.found.kfName && d.found.system !== 'motion' ? d.found : css[0])?.anim.transition,
+    others: css.filter(o => o !== d.found).map(o => o.anim),
+    old: d.found?.system === 'tailwind' ? d.found.tw : undefined,
+    name: name ?? (d.name.trim() || undefined),
+  }
+}
+/** Write a draft to source in its system. Resolves with a message; rejects with why it couldn't. */
+async function saveAnim(el: HTMLElement, d: Draft, founds: Found[], info: ServerInfo | null): Promise<string> {
+  const f = d.found
+  if (d.system === 'css') {
+    // plain-CSS keyframes stay plain CSS: the block is rewritten where it's defined
+    const rule = f?.kfName ? keyframesRule(el.ownerDocument, f.kfName) : null, file = rule && sheetFile(rule)
+    if (!f?.kfName || !file) throw new Error('these keyframes aren’t in a stylesheet Vite serves, so they can’t be written back')
+    const [r] = await postCss([{ kind: 'keyframes-block', file, name: f.kfName, css: A.keyframesCss(f.kfName, A.filled(d.anim, f.rest)) }], false)
+    if (!r.ok) throw new Error(r.error)
+    return `Saved @keyframes ${f.kfName} in ${r.file}. Its duration and easing live in the CSS rule that runs it.`
+  }
+  const src = sourceOf(el)
+  if (!src) throw new Error('this element isn’t in your source (a library component, or added in canvas mode)')
+  const edit: Partial<Pending> = {}
+  let extra = ''
+  if (d.system === 'motion') {
+    const mf = motionFiber(el), old = f?.system === 'motion' ? f.motion : undefined
+    const animate = A.TRIGGERS[d.anim.trigger].motion === 'animate'
+    if (animate && founds.some(o => o !== f && o.system === 'motion' && A.TRIGGERS[o.anim.trigger].motion === 'animate'))
+      throw new Error('Motion runs one `animate` per element, and this one already has an enter or loop animation. Edit that one, or put this on a wrapper.')
+    const isolate = founds.some(o => o !== f && o.system === 'motion' && o.motion?.at.transition === 'transition')
+    const props = A.motionEdits(d.anim, old, { isolate })
+    if (d.anim.trigger === 'inView' && !old) props['viewport.once'] = true
+    edit.props = props
+    if (!mf) edit.motion = info?.motion ?? 'motion/react'
+    if (f?.system === 'tailwind') edit.removeClasses = f.tw!.classes.map(c => c.cls)
+    if (f?.system === 'css') extra = ' The original CSS rule is still there; remove it when you’re happy.'
+  } else {
+    let ctx = twContext(el, d, founds, info), e = A.tailwindEdits(d.anim, ctx)
+    if (!e.add.length && !e.remove.length && !e.keyframes) throw new Error(e.notes[0] ?? 'Nothing changed.')
+    if (e.keyframes) {
+      // a name already used on the page is replaced where it's defined, or (Tailwind's own, a package's) given a fresh one
+      const existing = keyframesRule(el.ownerDocument, e.keyframes.name)
+      const [r] = await postCss([{ kind: 'keyframes-block', file: existing ? sheetFile(existing) ?? undefined : undefined, name: e.keyframes.name, css: e.keyframes.css, fresh: !!existing }], false)
+      if (!r.ok) throw new Error(r.error)
+      if (r.name && r.name !== e.keyframes.name) { ctx = twContext(el, d, founds, info, r.name); e = A.tailwindEdits(d.anim, ctx) }
+      extra = ` @keyframes ${r.name ?? e.keyframes!.name} is in ${r.file}.`
+    }
+    edit.classes = e.add
+    edit.removeClasses = e.remove
+    if (f?.system === 'motion') edit.props = A.motionRemove(f.motion!)
+    if (f?.system === 'css' && !f.kfName) extra += ' The original CSS rule is still there; remove it when you’re happy.'
+  }
+  const res = await postApply([{ els: [el], file: src.file, loc: src.loc, line: src.line, styles: {}, variant: '', repeats: 1, ...edit }], false)
+  const r = res.files[0]?.results[0]
+  if (!r?.ok) throw new Error(r?.error ?? res.error ?? 'couldn’t write')
+  const skipped = r.skipped.length ? ` ${r.skipped.map(x => x.prop).join(', ')}: ${r.skipped[0].reason}.` : ''
+  return `Saved to ${src.file.split('/').pop()}:${src.line}.${extra}${skipped}${r.note ? ` ${r.note}` : ''}`
+}
+async function deleteAnim(el: HTMLElement, f: Found, founds: Found[], info: ServerInfo | null): Promise<string> {
+  const src = sourceOf(el)
+  if (f.system === 'css') throw new Error('this comes from your CSS; remove it there')
+  if (!src) throw new Error('this element isn’t in your source')
+  const edit: Partial<Pending> = {}
+  if (f.system === 'motion') {
+    const initialUsed = founds.some(o => o !== f && o.system === 'motion' && o.motion?.at.from === 'initial')
+    edit.props = A.motionRemove(f.motion!, { keepInitial: initialUsed })
+  } else {
+    const model = A.classifyTailwind(el.getAttribute('class') ?? '')
+    const lastCss = !founds.some(o => o !== f && o.system !== 'motion' && !o.kfName)
+    edit.removeClasses = [...f.tw!.classes.map(c => c.cls), ...(lastCss && !f.kfName ? model.timing.map(c => c.cls) : [])]
+  }
+  void info
+  const res = await postApply([{ els: [el], file: src.file, loc: src.loc, line: src.line, styles: {}, variant: '', repeats: 1, ...edit }], false)
+  const r = res.files[0]?.results[0]
+  if (!r?.ok) throw new Error(r?.error ?? res.error ?? 'couldn’t write')
+  return `Removed it from ${src.file.split('/').pop()}:${src.line}.`
+}
+function PresetMenu({ onPick }: { onPick: (anim: A.Anim, name: string) => void }) {
+  const [saved, setSaved] = useState<SavedPreset[]>([])
+  useEffect(() => { void loadPresets().then(setSaved) }, [])
+  const drop = async (name: string) => {
+    const next = saved.filter(p => p.name !== name)
+    try { await savePresets(next); setSaved(next) } catch (e) { notify(`Couldn’t remove it: ${(e as Error).message}`) }
+  }
+  return (
+    <div className="pmenu">
+      <button className="preset" onClick={() => onPick(BLANK, '')}><b>Blank</b><span>start from nothing</span></button>
+      {A.PRESETS.map(p => <button key={p.name} className="preset" onClick={() => onPick(p.anim, '')}><b>{p.name}</b><span>{A.describe(p.anim)}</span></button>)}
+      {saved.map(p => (
+        <div key={'s' + p.name} className="preset saved" role="button" onClick={() => onPick(p.anim, p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'))}>
+          <b>{p.name}</b><span>{A.describe(p.anim)}</span>
+          <button className="b xs" data-tip="Remove preset" onClick={e => { e.stopPropagation(); void drop(p.name) }}><Icon d={P.x} size={10} /></button>
+        </div>
+      ))}
+    </div>
+  )
+}
+function AnimationsSection({ el, rev, select }: { el: HTMLElement; rev: number; select: (el: HTMLElement | null) => void }) {
+  const info = useServerInfo()
+  const [founds, setFounds] = useState<Found[] | null>(null)
+  const [tick, setTick] = useState(0), [draft, setDraft] = useState<Draft | null>(null), [menu, setMenu] = useState(false)
+  const cls = el.getAttribute('class')
+  useEffect(() => { setDraft(null); setMenu(false) }, [el])
+  useEffect(() => {
+    const t = setTimeout(() => { try { setFounds(interpret(el)) } catch (e) { console.warn('[watcher] reading animations failed', e); setFounds([]) } }, 120)
+    return () => clearTimeout(t)
+  }, [el, rev, cls, tick])
+  // hot reload swaps the element's classes and props, and a new element type (div → motion.div) is a new DOM node:
+  // find it again by where it is in the source
+  const refresh = () => {
+    const where = locate(el)
+    setTick(n => n + 1)
+    for (const ms of [500, 1200, 2500]) setTimeout(() => { if (!el.isConnected) { const next = findLoc(where); if (next && next.isConnected) select(next) } else setTick(n => n + 1) }, ms)
+  }
+  if (info === undefined) return null
+  if (draft) return <AnimationBuilder el={el} draft={draft} setDraft={setDraft} founds={founds ?? []} info={info} onDone={msg => { setDraft(null); if (msg) notify(msg); refresh() }} />
+  const canMotion = !!(info?.motion || motionFiber(el))
+  return (
+    <Section title="Animations" n={founds?.length || undefined}>
+      {founds === null ? <p className="empty">Reading this element’s animations…</p>
+        : !founds.length ? <p className="empty">No animations here yet.</p>
+        : founds.map(f => (
+          <div key={f.key} className="anim">
+            <div className="animh">
+              <b>{A.TRIGGERS[f.anim.trigger].label}</b>
+              <span className={'sys ' + f.system}>{SYSTEM_LABEL[f.system]}{f.kfName ? ` · ${f.kfName}` : f.motion?.label ? ` · “${f.motion.label}”` : ''}</span>
+              <span className="sp" />
+              <button className="b xs" data-tip="Play it" onClick={() => playFound(el, f)}><Icon d={P.play} size={11} /></button>
+              <button className="b xs" data-tip="Edit" onClick={() => setDraft({ anim: structuredClone(f.anim), system: f.system, found: f, name: f.kfName ?? '' })}><Icon d={P.sliders} size={12} /></button>
+            </div>
+            <p className="animd">{A.describe(f.anim, f.rest)}</p>
+            {f.notes.map((n, i) => <p key={i} className="animn">{n}</p>)}
+          </div>
+        ))}
+      <button className="b sm animnew" onClick={() => setMenu(m => !m)}><Icon d={P.plus} size={12} />New animation</button>
+      {menu && <PresetMenu onPick={(anim, name) => { setMenu(false); setDraft({ anim: structuredClone(anim), system: anim.trigger === 'inView' || canMotion ? (canMotion ? 'motion' : 'tailwind') : 'tailwind', name }) }} />}
+    </Section>
+  )
+}
+const TRIGGER_CHIPS: A.Trigger[] = ['enter', 'hover', 'press', 'focus', 'inView', 'loop']
+function AnimationBuilder({ el, draft, setDraft, founds, info, onDone }: {
+  el: HTMLElement; draft: Draft; setDraft: (d: Draft | null | ((d: Draft | null) => Draft | null)) => void; founds: Found[]; info: ServerInfo | null; onDone: (msg?: string) => void
+}) {
+  const [sel, setSel] = useState(draft.anim.frames.length - 1)
+  const [busy, setBusy] = useState(false), [err, setErr] = useState(''), [naming, setNaming] = useState<string | null>(null)
+  const [nk, setNk] = useState(''), [confirmDel, setConfirmDel] = useState(false)
+  const a = draft.anim, i = Math.min(sel, a.frames.length - 1), frame = a.frames[i], f = draft.found
+  const rest = f?.rest ?? restOf(el)
+  const mf = motionFiber(el), canMotion = !!(info?.motion || mf)
+  const update = (fn: (a: A.Anim) => A.Anim) => { setErr(''); setDraft(d => (d ? { ...d, anim: fn(d.anim) } : d)) }
+  const setValues = (idx: number, fn: (v: A.Values) => A.Values) => update(x => ({ ...x, frames: x.frames.map((fr, j) => (j === idx ? { ...fr, values: fn(fr.values) } : fr)) }))
+  const setT = (k: string, v: unknown) => update(x => { const t = { ...x.transition }; if (v === undefined) delete t[k]; else t[k] = v; return { ...x, transition: t } })
+  const setTrigger = (t: A.Trigger) => {
+    setErr('')
+    setDraft(d => {
+      if (!d) return d
+      const tr = { ...d.anim.transition }
+      if (t === 'loop' && tr.repeat === undefined) tr.repeat = Infinity
+      if (t !== 'loop' && d.anim.trigger === 'loop' && tr.repeat === Infinity) delete tr.repeat
+      const system: System = t === 'inView' && d.system !== 'motion' && canMotion ? 'motion' : d.system
+      return { ...d, system, anim: { ...d.anim, trigger: t, transition: tr } }
+    })
+  }
+  const addFrame = () => {
+    const j = i < a.frames.length - 1 ? i : i - 1
+    const pos = A.r4((a.frames[j].at + a.frames[j + 1].at) / 2)
+    update(x => ({ ...x, frames: [...x.frames.slice(0, j + 1), { at: pos, values: {} }, ...x.frames.slice(j + 1)] }))
+    setSel(j + 1)
+  }
+  const removeFrame = () => { if (i > 0 && i < a.frames.length - 1) { update(x => ({ ...x, frames: x.frames.filter((_, j) => j !== i) })); setSel(i - 1) } }
+  const moveFrame = (pct: number) => { if (i > 0 && i < a.frames.length - 1) update(x => ({ ...x, frames: x.frames.map((fr, j) => (j === i ? { ...fr, at: Math.min(x.frames[i + 1].at - 0.01, Math.max(x.frames[i - 1].at + 0.01, pct / 100)) } : fr)) })) }
+  const addKey = (k: string) => { if (!k || k in frame.values) return; setValues(i, v => ({ ...v, [k]: i === a.frames.length - 1 ? rest[k] ?? A.IDENTITY[k] ?? KEY_START[k] ?? 0 : KEY_START[k] ?? rest[k] ?? 0 })); setNk('') }
+  const frameName = (j: number) => j === 0 ? (isGesture(a.trigger) ? 'Rest' : 'From') : j === a.frames.length - 1 ? (a.trigger === 'loop' ? 'End' : 'To') : `${Math.round(a.frames[j].at * 100)}%`
+  const steps = a.frames.length > 2 || a.trigger === 'loop'
+  // what will be written, worked out as you edit
+  let code = '', notes: string[] = []
+  try {
+    if (draft.system === 'motion') {
+      const props = A.motionEdits(a, f?.system === 'motion' ? f.motion : undefined, { isolate: founds.some(o => o !== f && o.system === 'motion' && o.motion?.at.transition === 'transition') })
+      code = Object.entries(props).map(([k, v]) => (v === null ? `− ${k}` : `${k} = ${toJson(v).replace(/"__Infinity__"/g, 'Infinity')}`)).join('\n')
+      if (!mf) code = `<${el.tagName.toLowerCase()}> → <motion.${el.tagName.toLowerCase()}>\n` + code
+    } else if (draft.system === 'tailwind') {
+      const e = A.tailwindEdits(a, twContext(el, draft, founds, info))
+      notes = e.notes
+      code = [...e.remove.map(c => `− ${c}`), ...e.add.map(c => `+ ${c}`), ...(e.keyframes ? ['', e.keyframes.css] : [])].join('\n')
+    } else code = A.keyframesCss(f?.kfName ?? 'name', A.filled(a, rest))
+  } catch (e) { code = `(${(e as Error).message})` }
+  const run = async (fn: () => Promise<string>) => { setBusy(true); setErr(''); try { onDone(await fn()) } catch (e) { setErr((e as Error).message) } setBusy(false) }
+  const keepPreset = async (name: string) => {
+    if (!name.trim()) return
+    try { const list = await loadPresets(); await savePresets([...list.filter(p => p.name !== name.trim()), { name: name.trim(), anim: a }]); setNaming(null); notify(`Saved “${name.trim()}” to watcher.animations.json`) }
+    catch (e) { setErr(`Couldn’t save the preset: ${(e as Error).message}`) }
+  }
+  const systems: [System, string][] = f?.inherited ? [['motion', 'Motion']] : [...(canMotion ? [['motion', 'Motion'] as [System, string]] : []), ['tailwind', 'Tailwind'], ...(f?.system === 'css' && f.kfName ? [['css', 'CSS'] as [System, string]] : [])]
+  return (
+    <Section title={f ? `Edit · ${A.TRIGGERS[f.anim.trigger].label}` : 'New animation'}>
+      <div className="trigs">{TRIGGER_CHIPS.map(t => <button key={t} className={'ezchip' + (a.trigger === t ? ' on' : '')} onClick={() => setTrigger(t)}>{A.TRIGGERS[t].label}</button>)}</div>
+      {systems.length > 1 && <Seg value={draft.system} options={systems as unknown as readonly (readonly [System, ReactNode])[]} onChange={v => setDraft(d => (d ? { ...d, system: v } : d))} />}
+      <Lbl>Keyframes</Lbl>
+      <div className="kftrack">
+        {a.frames.map((fr, j) => <button key={j} className={'kfd' + (j === i ? ' on' : '')} style={{ left: `${fr.at * 100}%` }} data-tip={frameName(j)} onClick={() => setSel(j)} />)}
+      </div>
+      <div className="framebar">
+        <b>{frameName(i)}</b>
+        {i > 0 && i < a.frames.length - 1 && <Num suffix="%" value={Math.round(frame.at * 100)} unit="" onChange={x => moveFrame(parseFloat(x))} />}
+        <span className="sp" />
+        <button className="b xs" data-tip="Add a keyframe after this one" onClick={addFrame}><Icon d={P.plus} size={12} /></button>
+        {i > 0 && i < a.frames.length - 1 && <button className="b xs" data-tip="Remove this keyframe" onClick={removeFrame}><Icon d={P.trash} size={12} /></button>}
+      </div>
+      {i === 0 && isGesture(a.trigger) && !Object.keys(frame.values).length && <p className="stnote">Starts from however the element looks. Set values here only to change its resting look too.</p>}
+      {Object.entries(frame.values).map(([k, v]) => (
+        <div className="kv" key={k}>
+          <span className="k mono" title={k}>{k}</span>
+          {typeof v === 'number' ? <Num value={v} unit="" digits={2} step={Math.abs(v) <= 2 ? 0.05 : 1} onChange={x => { const n = parseFloat(x); if (!isNaN(n)) setValues(i, vals => ({ ...vals, [k]: n })) }} />
+            : <Field mono value={String(v)} onChange={x => setValues(i, vals => ({ ...vals, [k]: x }))} />}
+          <button className="b xs" data-tip="Remove" onClick={() => setValues(i, vals => { const n = { ...vals }; delete n[k]; return n })}><Icon d={P.x} size={12} /></button>
+        </div>
+      ))}
+      <div className="kv">
+        <div className="f"><input className="mono" list="w-anim-keys" placeholder="add a value: opacity, y, scale…" value={nk} onChange={e => setNk(e.target.value)} onKeyDown={e => e.key === 'Enter' && addKey(nk.trim())} spellCheck={false} /></div>
+        <button className="b xs" data-tip="Add" disabled={!nk.trim()} onClick={() => addKey(nk.trim())}><Icon d={P.plus} size={12} /></button>
+        <datalist id="w-anim-keys">{COMMON_KEYS.filter(k => !(k in frame.values)).map(k => <option key={k} value={k} />)}</datalist>
+      </div>
+      <Lbl>Timing</Lbl>
+      <MotionTransition t={a.transition} set={setT} stagger={false} />
+      {draft.system !== 'motion' && steps && <Row label="Keyframes name"><Field mono value={draft.name} placeholder="auto" onChange={x => setDraft(d => (d ? { ...d, name: x.replace(/[^\w-]/g, '-') } : d))} /></Row>}
+      <p className="animd">{A.describe(a, rest)}</p>
+      <pre className="pcode">{code || 'Nothing to write yet.'}</pre>
+      {notes.map((n, j) => <p key={j} className="stnote">{n}</p>)}
+      {err && <p className="cerr">{err}</p>}
+      <div className="bldbar">
+        <button className="b sm" onClick={() => previewAnim(el, a, rest)}><Icon d={P.play} size={11} />Preview</button>
+        <button className="b sm save" disabled={busy} onClick={() => void run(() => saveAnim(el, draft, founds, info))}><Icon d={P.code} size={13} />{busy ? 'Saving…' : 'Save to code'}</button>
+      </div>
+      <div className="bldbar soft">
+        {naming == null ? <button className="b sm" onClick={() => setNaming('')}>Save as preset…</button>
+          : <div className="kv"><div className="f"><input autoFocus placeholder="preset name" value={naming} onChange={e => setNaming(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void keepPreset(naming); if (e.key === 'Escape') setNaming(null) }} /></div><button className="b xs" disabled={!naming.trim()} onClick={() => void keepPreset(naming)}><Icon d={P.check} size={12} /></button></div>}
+        {f && f.system !== 'css' && !f.inherited && (confirmDel
+          ? <button className="b sm danger" disabled={busy} onClick={() => void run(() => deleteAnim(el, f, founds, info))}>Remove it from code</button>
+          : <button className="b sm" onClick={() => setConfirmDel(true)}><Icon d={P.trash} size={12} />Delete</button>)}
+        <button className="b sm" onClick={() => onDone()}>Cancel</button>
+      </div>
+    </Section>
+  )
+}
+
+function AnimateTab({ el, select, rev }: { el: HTMLElement; select: (el: HTMLElement | null) => void; rev: number }) {
   const cs = getComputedStyle(el)
   const set = (p: string) => (v: string) => editStyle(el, p, v)
   const durs = splitList(cs.transitionDuration).map(toMs), props = splitList(cs.transitionProperty)
@@ -1704,7 +1923,9 @@ function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement 
   return (
     <>
       <Crumbs el={el} select={select} />
+      <AnimationsSection el={el} rev={rev} select={select} />
       {issues.length > 0 && <Section title="Motion checks" n={issues.length}>{issues.map((it, i) => <IssueRow key={i} it={it} />)}</Section>}
+      <Section title="Fine-tune">
       {mf && <MotionSection el={el} f={mf} />}
       {(!mf || moves) && <Section title={mf ? 'CSS transition' : 'Transition'}>
         {!moves && <p className="empty">No transition yet. Give it a duration and state changes (hover, focus, press) animate.</p>}
@@ -1731,7 +1952,7 @@ function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement 
           <button className="wide" onClick={() => replayKeyframes(el)}><Icon d={P.replay} />Replay</button>
         </Section>
       ))}
-      <AddAnimation el={el} />
+      </Section>
       <p className="stnote">Press <kbd>M</kbd> for the timeline: it catches animations as they run, and replays them at 25% or 10% speed.{mf && ' Motion runs some values (springs on x, y, scale) in JavaScript; those don’t show there, so replay them here.'}</p>
     </>
   )
@@ -2048,7 +2269,7 @@ const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide,
           : !el ? <Help />
           : tab === 'design' ? <DesignTab el={el} select={select} />
           : tab === 'prototype' ? <PrototypeTab el={el} select={select} />
-          : <AnimateTab el={el} select={select} />}
+          : <AnimateTab el={el} select={select} rev={rev} />}
       </div>
       {!guide && (
         <div className="foot">
@@ -2256,8 +2477,10 @@ function useServerInfo() {
   useEffect(() => { void serverInfo().then(setInfo) }, [])
   return info
 }
-type CssEdit = { kind: 'keyframes'; file: string; name: string; offset: string; prop: string; value: string | null } | { kind: 'theme'; name: string; value: string }
-type CssResult = { ok: boolean; error?: string; file?: string }
+type CssEdit = { kind: 'keyframes'; file: string; name: string; offset: string; prop: string; value: string | null }
+  | { kind: 'theme'; name: string; value: string }
+  | { kind: 'keyframes-block'; file?: string; name: string; css: string | null; fresh?: boolean }
+type CssResult = { ok: boolean; error?: string; file?: string; name?: string }
 async function postCss(edits: CssEdit[], dryRun: boolean): Promise<CssResult[]> {
   const r = await fetch('/__watcher/css', { method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' }, body: JSON.stringify({ dryRun, edits }) })
   const j = await r.json()
@@ -2373,30 +2596,244 @@ function motionCssProps(p: Vals) {
   if (isObj(p.variants)) Object.values(p.variants).forEach(scan)
   return out
 }
-const springDefaults = { stiffness: 100, damping: 10, mass: 1, bounce: 0.3 } // motion-dom's defaults
-/** Spring physics for a transition, the way Motion resolves duration/bounce (duration alone is approximate). */
-function springOf(t: Vals) {
-  const n = (k: string) => (typeof t[k] === 'number' ? (t[k] as number) : undefined)
-  if (['stiffness', 'damping', 'mass'].some(k => n(k) !== undefined) || (n('visualDuration') === undefined && n('duration') === undefined && n('bounce') === undefined))
-    return { k: n('stiffness') ?? springDefaults.stiffness, c: n('damping') ?? springDefaults.damping, m: n('mass') ?? springDefaults.mass, approx: false }
-  const bounce = n('bounce') ?? springDefaults.bounce
-  const ratio = bounce < 0 ? 1 / Math.max(1 + bounce, 0.05) : Math.max(1 - bounce, 0.05)
-  const vd = n('visualDuration') ?? (n('duration') ?? 0.8) / 2.4 // duration is time-to-settle; Motion solves for it, this estimates it
-  const k = ((2 * Math.PI) / (vd * 1.2)) ** 2
-  return { k, c: 2 * ratio * Math.sqrt(k), m: 1, approx: n('visualDuration') === undefined || bounce < 0 }
-}
-/** Simulate the spring from 0 to 1: points for a curve, and when it settles. */
-function springCurve(t: Vals) {
-  const { k, c, m, approx } = springOf(t)
-  const pts: [number, number][] = []
-  let x = 0, v = 0, settle = 0
-  for (let i = 0, dt = 1 / 240; i < 240 * 4; i++) {
-    const a = (-k * (x - 1) - c * v) / m
-    v += a * dt; x += v * dt
-    if (Math.abs(x - 1) > 0.005 || Math.abs(v) > 0.05) settle = (i + 1) * dt
-    if (i % 4 === 0) pts.push([(i + 1) * dt, x])
+// ── reading the animations an element already has ──
+// Values come from the browser (themes, CSS variables, group-hover and plain CSS all resolved); the className only
+// says which classes are behind each animation, so a rewrite replaces exactly those.
+const PROBE = ['opacity', 'translate', 'scale', 'rotate', 'transform', 'filter', 'backdrop-filter', 'background-color', 'color', 'border-color', 'box-shadow', 'outline-color', 'border-radius', 'animation-name']
+type Diff = Record<string, [string, string]>
+const snap = (el: Element) => { const cs = getComputedStyle(el); return Object.fromEntries(PROBE.map(p => [p, cs.getPropertyValue(p)])) as Record<string, string> }
+const diffOf = (a: Record<string, string>, b: Record<string, string>): Diff => Object.fromEntries(PROBE.filter(p => a[p] !== b[p]).map(p => [p, [a[p], b[p]]]))
+/** Declarations from @starting-style rules that apply to `el` (top-level or nested), in source order. */
+function startingDecls(el: Element): [string, string][] {
+  const out: [string, string][] = [], win = el.ownerDocument.defaultView!
+  const take = (st: CSSStyleDeclaration) => { for (const p of st) out.push([p, st.getPropertyValue(p)]) }
+  const walk = (rules: CSSRuleList, starting: boolean, matched: boolean) => {
+    for (const r of rules) {
+      const text = r.cssText
+      if ('selectorText' in r) {
+        let m = false
+        try { m = el.matches((r as CSSStyleRule).selectorText) } catch { /* a nested & selector */ }
+        if (starting && m) take((r as CSSStyleRule).style)
+        if (m && (r as CSSStyleRule).cssRules?.length) walk((r as CSSStyleRule).cssRules, starting, true)
+      } else if ('style' in r && starting && matched) take((r as CSSStyleRule).style) // nested declarations inside @starting-style
+      else if ((r as CSSGroupingRule).cssRules) {
+        if (text.startsWith('@media') && !win.matchMedia((r as CSSMediaRule).conditionText).matches) continue
+        walk((r as CSSGroupingRule).cssRules, starting || text.startsWith('@starting-style'), matched)
+      }
+    }
   }
-  return { pts: pts.filter(([s]) => s <= Math.max(0.3, settle * 1.15)), settle, approx }
+  for (const sh of el.ownerDocument.styleSheets) { try { walk(sh.cssRules, false, false) } catch { /* cross-origin sheet */ } }
+  return out
+}
+let probing = false
+/** Make the page's real :hover/:active/:focus rules unmatchable until the returned function puts them back. */
+function muteStates(doc: Document) {
+  const changed: [CSSStyleRule, string][] = []
+  const walk = (rules: CSSRuleList) => {
+    for (const r of rules) {
+      if ('selectorText' in r) {
+        const sel = (r as CSSStyleRule).selectorText, muted = muteSelectors(sel)
+        if (muted !== sel) { (r as CSSStyleRule).selectorText = muted; changed.push([r as CSSStyleRule, sel]) }
+      }
+      if ((r as CSSGroupingRule).cssRules) walk((r as CSSGroupingRule).cssRules)
+    }
+  }
+  for (const sh of doc.styleSheets) { try { walk(sh.cssRules) } catch { /* cross-origin sheet */ } }
+  return () => { for (const [r, sel] of changed) r.selectorText = sel }
+}
+const probeNodes = new WeakSet<Node>() // temporary copies the probe inserts; DOM observers ignore them
+const onlyProbe = (list: MutationRecord[]) => list.every(r => [...r.addedNodes, ...r.removedNodes].every(n => probeNodes.has(n)))
+// timing as the element has it at rest (and per state for keyframes that only run in that state)
+const TIMING = ['transition-property', 'transition-duration', 'transition-timing-function', 'transition-delay',
+  'animation-name', 'animation-duration', 'animation-timing-function', 'animation-delay', 'animation-iteration-count', 'animation-direction'] as const
+type Timing = Record<(typeof TIMING)[number], string>
+const timingOf = (el: Element) => { const cs = getComputedStyle(el); return Object.fromEntries(TIMING.map(p => [p, cs.getPropertyValue(p)])) as Timing }
+type Probe = { rest: Record<string, string>; states: Partial<Record<State, Diff>>; starting: Diff | null; timing: Timing; stateTiming: Partial<Record<State, Timing>> }
+/** What the element looks like at rest, in each state, and before it appears, with every transition switched off
+ *  so nothing on the page animates while Watcher looks. */
+function probe(el: HTMLElement): Probe {
+  const doc = el.ownerDocument, quiet = new doc.defaultView!.CSSStyleSheet()
+  // the copy the probe reads transition timing from keeps its transitions (it's new, so nothing on it can animate)
+  quiet.replaceSync(':not([data-wprobe]), :not([data-wprobe])::before, :not([data-wprobe])::after { transition: none !important; }')
+  doc.adoptedStyleSheets = [...doc.adoptedStyleSheets, quiet]
+  const was = forced.get(el) ?? null, style = el.getAttribute('style')
+  const out: Probe = { rest: {}, states: {}, starting: null, timing: {} as Timing, stateTiming: {} }
+  probing = true
+  // the forced-state copies are built from the real rules, so build them first; then the pointer can't sway the reading
+  forced.set(el, 'hover'); applyStates(doc)
+  const unmute = muteStates(doc)
+  try {
+    forced.delete(el); applyStates(doc)
+    out.rest = snap(el)
+    for (const st of STATES) {
+      forced.set(el, st); applyStates(doc)
+      const d = diffOf(out.rest, snap(el))
+      if (Object.keys(d).length) out.states[st] = d
+      if (d['animation-name']) out.stateTiming[st] = timingOf(el)
+    }
+    // timing, read while the page's real states are muted (the pointer may be over the element): from an untouched
+    // copy beside it, since the element's own transitions are switched off. A running animation also shows in computed
+    // values (opacity 0.82 mid-pulse), so the element's own values come from that copy with animations off; the real
+    // animation is never restarted.
+    const c = el.cloneNode(false) as HTMLElement
+    probeNodes.add(c)
+    c.setAttribute('data-wprobe', '')
+    for (const [p, v] of [['visibility', 'hidden'], ['position', 'absolute'], ['pointer-events', 'none']]) c.style.setProperty(p, v, 'important')
+    el.after(c)
+    try {
+      out.timing = timingOf(c)
+      if (out.timing['animation-name'] !== 'none') {
+        c.style.setProperty('animation', 'none', 'important')
+        const own = snap(c)
+        for (const p of PROBE) if (p !== 'animation-name') out.rest[p] = own[p]
+      }
+    } finally { c.remove() }
+    forced.delete(el); applyStates(doc)
+    // @starting-style can't be forced: apply its declarations inline for a moment (vars and calc resolve) and read them
+    const decls = startingDecls(el)
+    if (decls.length) {
+      for (const [p, v] of decls) el.style.setProperty(p, v)
+      const d = diffOf(snap(el), out.rest)
+      if (Object.keys(d).length) out.starting = d
+    }
+  } finally {
+    unmute()
+    if (style == null) el.removeAttribute('style'); else el.setAttribute('style', style)
+    if (was) forced.set(el, was); else forced.delete(el)
+    applyStates(doc)
+    void getComputedStyle(el).opacity // settle while transitions are still off, so putting things back doesn't animate
+    doc.adoptedStyleSheets = doc.adoptedStyleSheets.filter(x => x !== quiet)
+    probing = false
+  }
+  return out
+}
+/** Two snapshots of CSS values as IR from/to values: only what actually differs. */
+function valuesOf(d: Diff) {
+  const from: A.Values = {}, to: A.Values = {}
+  for (const [p, [a, b]] of Object.entries(d)) {
+    if (p === 'animation-name') continue
+    const va = A.cssToValues(p, a), vb = A.cssToValues(p, b)
+    for (const k of new Set([...Object.keys(va), ...Object.keys(vb)])) {
+      if (A.sameValue(va[k], vb[k])) continue
+      if (va[k] !== undefined) from[k] = va[k]
+      if (vb[k] !== undefined) to[k] = vb[k]
+    }
+  }
+  return { from, to }
+}
+/** The CSS transition entry that times these properties (lists repeat; `all` and `transform` cover more). */
+function cssTiming(cs: Timing, props: string[]): { t: A.Transition; missing: string[] } {
+  const list = splitList(cs['transition-property']), missing: string[] = []
+  let idx = -1
+  for (const p of props) {
+    const i = list.findIndex(x => x === p || x === 'all' || (x === 'transform' && /^(translate|scale|rotate)$/.test(p)))
+    if (i < 0) missing.push(p); else if (idx < 0) idx = i
+  }
+  if (idx < 0) return { t: { type: 'tween', duration: 0 }, missing }
+  return { t: A.transitionFromCss(toMs(at(cs['transition-duration'], idx)), at(cs['transition-timing-function'], idx), toMs(at(cs['transition-delay'], idx))), missing }
+}
+function keyframeFrames(rule: CSSKeyframesRule): A.Frame[] {
+  const m = new Map<number, A.Values>()
+  for (const k of [...rule.cssRules] as CSSKeyframeRule[]) {
+    const vals: A.Values = {}
+    for (const p of k.style) if (!p.startsWith('--') && p !== 'animation-timing-function') Object.assign(vals, A.cssToValues(p, k.style.getPropertyValue(p)))
+    for (const o of k.keyText.split(',')) { const t = o.trim(), pos = t === 'from' ? 0 : t === 'to' ? 1 : A.r4(parseFloat(t) / 100); m.set(pos, { ...(m.get(pos) ?? {}), ...vals }) }
+  }
+  if (!m.has(0)) m.set(0, {})
+  if (!m.has(1)) m.set(1, {})
+  return [...m].sort((a, b) => a[0] - b[0]).map(([pos, values]) => ({ at: pos, values }))
+}
+type System = 'motion' | 'tailwind' | 'css'
+type Found = { key: string; anim: A.Anim; system: System; motion?: A.MotionFound; tw?: { anim: A.Anim; classes: A.TwClass[] }; kfName?: string; state?: State; rest: A.Values; notes: string[]; inherited?: boolean }
+/** Variant labels a motion element follows from the nearest motion ancestor that sets them (staggered lists). */
+function inheritedLabels(f: Fiber): { initial?: string; animate?: string; from?: string } {
+  for (let p = f.return; p; p = p.return) {
+    const n = typeName(p.type)
+    if (!n?.startsWith('motion.')) continue
+    const q = currentProps(p) as Record<string, unknown>
+    if (typeof q.animate === 'string') return { initial: typeof q.initial === 'string' ? q.initial : undefined, animate: q.animate, from: n }
+    if (q.animate !== undefined || q.inherit === false) return {}
+  }
+  return {}
+}
+const STATE_TRIGGER: Record<State, A.Trigger> = { hover: 'hover', active: 'press', focus: 'focus' }
+const TRIGGER_ORDER: A.Trigger[] = ['enter', 'inView', 'hover', 'press', 'focus', 'loop']
+/** Every animation an element has: CSS state changes, @starting-style, keyframes, and Motion props. */
+function interpret(el: HTMLElement): Found[] {
+  const out: Found[] = []
+  const pr = probe(el), cs = pr.timing, model = A.classifyTailwind(el.getAttribute('class') ?? '')
+  const rest: A.Values = Object.assign({}, ...Object.entries(pr.rest).filter(([p]) => p !== 'animation-name' && p !== 'transform').map(([p, v]) => A.cssToValues(p, v)))
+  const jumpNote = (missing: string[]) => missing.length ? [`${missing.join(', ')} ${missing.length === 1 ? 'isn’t' : 'aren’t'} in transition-property, so ${missing.length === 1 ? 'it jumps' : 'they jump'} instead of animating`] : []
+  for (const st of STATES) {
+    const d = pr.states[st]
+    if (!d) continue
+    const trigger = STATE_TRIGGER[st], { from, to } = valuesOf(d)
+    if (!Object.keys(to).length) continue
+    const { t, missing } = cssTiming(cs, A.cssPropsOf(Object.keys(to)))
+    const classes = model.states[trigger] ?? [], anim: A.Anim = { trigger, frames: A.fromTo(from, to), transition: t }
+    out.push({ key: `css:${trigger}`, anim, system: classes.length ? 'tailwind' : 'css', tw: { anim, classes }, state: st, rest, notes: jumpNote(missing) })
+  }
+  if (pr.starting) {
+    const { from, to } = valuesOf(pr.starting)
+    if (Object.keys(from).length) {
+      const { t, missing } = cssTiming(cs, A.cssPropsOf(Object.keys(from)))
+      const classes = model.states.enter ?? [], anim: A.Anim = { trigger: 'enter', frames: A.fromTo(from, to), transition: t }
+      out.push({ key: 'css:enter', anim, system: classes.length ? 'tailwind' : 'css', tw: { anim, classes }, rest, notes: jumpNote(missing) })
+    }
+  }
+  // keyframe animations: running at rest, or only in a state (hover:animate-…)
+  const named: { name: string; trigger: A.Trigger; i: number; tm: Timing; state?: State }[] = []
+  splitList(cs['animation-name']).forEach((n, i) => { if (n !== 'none') named.push({ name: n, trigger: at(cs['animation-iteration-count'], i) === 'infinite' ? 'loop' : 'enter', i, tm: cs }) })
+  for (const st of STATES) {
+    const tm = pr.stateTiming[st]
+    if (tm) splitList(tm['animation-name']).forEach((n, i) => { if (n !== 'none' && !named.some(x => x.name === n)) named.push({ name: n, trigger: STATE_TRIGGER[st], i, tm, state: st }) })
+  }
+  for (const { name, trigger, i, tm, state } of named) {
+    const rule = keyframesRule(el.ownerDocument, name)
+    if (!rule) continue
+    const base = !state
+    const classes = model.animate.filter(c => (base ? !c.trigger : c.trigger === trigger))
+    const t = A.transitionFromCss(toMs(at(tm['animation-duration'], i)), at(tm['animation-timing-function'], i), toMs(at(tm['animation-delay'], i)), at(tm['animation-iteration-count'], i), at(tm['animation-direction'], i))
+    const anim: A.Anim = { trigger, frames: keyframeFrames(rule), transition: t }
+    out.push({ key: `kf:${name}`, anim, system: classes.length ? 'tailwind' : 'css', tw: { anim, classes }, kfName: name, state, rest, notes: [] })
+  }
+  const mf = motionFiber(el)
+  if (mf) {
+    const props = currentProps(mf) as Record<string, unknown>
+    for (const m of A.fromMotion(props)) out.push({ key: `motion:${m.at.target}`, anim: m.anim, system: 'motion', motion: m, rest, notes: m.notes })
+    // no animate of its own but variants: it follows the labels a motion parent animates through
+    const own = props.animate === undefined && props.inherit !== false && props.variants && typeof props.variants === 'object'
+    const inh = own ? inheritedLabels(mf) : {}
+    if (inh.animate) {
+      for (const m of A.fromMotion({ ...props, animate: inh.animate, initial: props.initial ?? inh.initial })) {
+        if (m.anim.trigger !== 'enter' && m.anim.trigger !== 'loop') continue
+        out.push({ key: `motion:inherited:${m.at.target}`, anim: m.anim, system: 'motion', motion: m, rest, inherited: true,
+          notes: [`Follows its parent <${inh.from}> through “${inh.initial ?? '…'}” → “${inh.animate}”; edits go into this element’s variants.`, ...m.notes] })
+      }
+    }
+  }
+  return out.sort((a, b) => TRIGGER_ORDER.indexOf(a.anim.trigger) - TRIGGER_ORDER.indexOf(b.anim.trigger))
+}
+/** Play an animation the way it really runs: Motion's own gestures, the forced CSS state, @starting-style, keyframes. */
+function playFound(el: HTMLElement, f: Found) {
+  if (f.system === 'motion') {
+    const mf = motionFiber(el), t = f.anim.trigger
+    if (mf && (t === 'enter' || t === 'inView')) return replayEnter(el, mf)
+    if (t === 'hover' || t === 'press' || t === 'focus') return playGesture(el, t === 'hover' ? 'whileHover' : t === 'press' ? 'whileTap' : 'whileFocus')
+  } else if (f.kfName && !f.state) return replayKeyframes(el)
+  else if (f.state) return playState(el, f.state)
+  else if (f.anim.trigger === 'enter') {
+    // @starting-style runs when an element starts being rendered: hide it for a frame
+    const d = el.style.getPropertyValue('display'), pri = el.style.getPropertyPriority('display')
+    el.style.setProperty('display', 'none', 'important'); void el.offsetWidth
+    if (d) el.style.setProperty('display', d, pri); else el.style.removeProperty('display')
+    return
+  }
+  previewAnim(el, f.anim, f.rest)
+}
+function previewAnim(el: HTMLElement, a: A.Anim, rest: A.Values) {
+  const { keyframes, options } = A.toWaapi(a, rest)
+  try { el.animate(keyframes, options).updatePlaybackRate(rec.rate) } catch (e) { notify(`Can’t preview: ${(e as Error).message}`) }
 }
 
 type Rec = { a: Animation; el: HTMLElement; kind: 'transition' | 'keyframes' | 'motion' | 'script'; name: string; t0: number }
@@ -2798,6 +3235,7 @@ function Profiler() {
     const raf = (t: number) => { if (last) pushCap(perf.frames, t - last, 120); last = t; id = requestAnimationFrame(raf) }
     id = requestAnimationFrame(raf)
     const mo = new MutationObserver(list => {
+      if (onlyProbe(list)) return // Watcher reading an element, not the app changing
       muts += list.length; perf.mutTotal += list.length
       if (prefs.flashUpdates) for (const m of list.slice(0, 60)) if (!m.attributeName?.startsWith('data-w')) flash(m.target, 'dom')
     })
@@ -2866,7 +3304,7 @@ type SrcResult = { loc: string; ok: boolean; error?: string; note?: string; befo
   mapped: { prop: string; value: string; cls: string }[]; skipped: { prop: string; value: string; reason: string }[]; props?: string[]; variant?: string }
 type ApplyResponse = { files: { file: string; changed: boolean; results: SrcResult[] }[]; error?: string }
 type Pending = { els: HTMLElement[]; file: string; loc: string; line: number; styles: Record<string, string>; text?: string; attrs?: Record<string, string | null>; variant: string; repeats: number
-  props?: Record<string, unknown>; state?: string; comp?: string; classes?: string[]; motion?: string }
+  props?: Record<string, unknown>; state?: string; comp?: string; classes?: string[]; removeClasses?: string[]; motion?: string }
 const BREAKPOINTS: [string, number][] = [['sm', 640], ['md', 768], ['lg', 1024], ['xl', 1280], ['2xl', 1536]]
 /** "file:line:col" stamped by the Vite plugin. */
 const parseSrc = (s: string) => { const m = /^(.*):(\d+):(\d+)$/.exec(s); return m ? { file: m[1], line: +m[2], col: +m[3], loc: `${m[2]}:${m[3]}` } : null }
@@ -2926,7 +3364,7 @@ function pendingEdits() {
 async function postApply(items: Pending[], dryRun: boolean): Promise<ApplyResponse> {
   const r = await fetch('/__watcher/apply', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' },
-    body: toJson({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant, props, classes, motion }) => ({ file, loc, styles, text, attrs, variant, props, classes, motion })) }),
+    body: toJson({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant, props, classes, removeClasses, motion }) => ({ file, loc, styles, text, attrs, variant, props, classes, removeClasses, motion })) }),
   })
   return r.json()
 }
@@ -3430,7 +3868,7 @@ function Overlay() {
     const st = document.createElement('style')
     st.textContent = GLOBAL_CSS
     document.head.appendChild(st)
-    const mo = new MutationObserver(() => { L.dirty = true })
+    const mo = new MutationObserver(list => { if (!onlyProbe(list)) L.dirty = true })
     mo.observe(document.body, { childList: true, subtree: true })
     const sx = scrollX, sy = scrollY
     if (!FRAME) { scrollTo(0, 0); frame('fit') } // a frame keeps its own scroll and is never zoomed
@@ -4387,6 +4825,32 @@ const CSS_TEXT = `
 .spring span { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .linkb { all: unset; display: block; margin: 2px 0 6px; font-size: 11px; color: var(--primary); cursor: pointer; }
 .linkb:hover { text-decoration: underline; }
+.sb > .sec { margin: 0 -12px; }
+.sb > .sec:last-child { border-bottom: 0; }
+.anim { padding: 6px 0; }
+.anim + .anim { border-top: 1px solid var(--border-soft); }
+.animh { display: flex; align-items: center; gap: 6px; }
+.animh b { font-size: 12px; font-weight: 600; color: var(--text); }
+.sys { font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 999px; color: var(--text-muted); box-shadow: inset 0 0 0 1px var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+.sys.motion { color: oklch(58% .17 350); box-shadow: inset 0 0 0 1px oklch(58% .17 350 / .35); }
+.sys.tailwind { color: oklch(58% .12 215); box-shadow: inset 0 0 0 1px oklch(58% .12 215 / .35); }
+.animd { margin: 3px 0 0; font-size: 11.5px; line-height: 1.4; color: var(--text-muted); }
+.animn { margin: 3px 0 0; font-size: 10.5px; line-height: 1.4; color: oklch(64% .14 70); }
+.animnew { justify-self: start; box-shadow: inset 0 0 0 1px var(--border); gap: 5px; }
+.pmenu { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.preset.saved { position: relative; padding-right: 22px; }
+.preset.saved .b { position: absolute; top: 4px; right: 4px; height: 16px; min-width: 16px; }
+.trigs { display: flex; flex-wrap: wrap; gap: 4px; }
+.framebar { display: flex; align-items: center; gap: 6px; min-height: 26px; }
+.framebar b { font-size: 11.5px; font-weight: 600; color: var(--text); }
+.framebar .num { width: 72px; flex: none; }
+.bldbar { display: flex; gap: 4px; }
+.bldbar .b { flex: 1; gap: 5px; box-shadow: inset 0 0 0 1px var(--border); transition: scale .12s cubic-bezier(0.2, 0, 0, 1), background-color .12s; }
+.bldbar .b:active:not(:disabled) { scale: 0.96; }
+.bldbar .save { background: var(--primary); color: var(--on-primary); font-weight: 600; box-shadow: none; }
+.bldbar .save:hover { background: var(--primary); color: var(--on-primary); filter: brightness(1.05); }
+.bldbar .danger { color: oklch(60% .2 25); box-shadow: inset 0 0 0 1px oklch(60% .2 25 / .5); }
+.bldbar.soft .kv { flex: 2; }
 .kftrack { position: relative; height: 22px; margin: 2px 7px 8px; border-radius: 6px; background: linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat; }
 .kfd { all: unset; position: absolute; top: 50%; width: 10px; height: 10px; translate: -50% -50%; rotate: 45deg; border-radius: 2px; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--text-muted); cursor: pointer; transition: background-color .12s, box-shadow .12s; }
 .kfd:hover { box-shadow: inset 0 0 0 1.5px var(--text); }

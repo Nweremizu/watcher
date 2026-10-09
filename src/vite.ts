@@ -8,7 +8,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { loadEnv, type Plugin } from 'vite'
 import { editSource, stampSource, type ElementEdit } from './writeback.ts'
-import { editKeyframes, setThemeVar } from './cssedit.ts'
+import { editKeyframes, setKeyframesBlock, setThemeVar } from './cssedit.ts'
+import { sanitizeAnim } from './anim.ts'
 
 type TwVersion = 3 | 4
 export type WatcherPluginOptions = { /** Tailwind major version; detected from package.json when omitted. */ tailwind?: TwVersion }
@@ -109,25 +110,52 @@ export function watcher(opts: WatcherPluginOptions = {}): Plugin {
           const theme = themeFile(root)
           return send(res, 200, { ok: true, tailwind: ver, motion, theme: theme && relative(root, theme).split(sep).join('/') })
         }
-        if (req.method !== 'POST' || (req.url !== '/apply' && req.url !== '/css')) return send(res, 404, { error: 'not found' })
+        // saved custom animations: a JSON file in the project, so the team shares them through git
+        const presetsFile = resolve(process.cwd(), 'watcher.animations.json')
+        if (req.method === 'GET' && req.url === '/presets') {
+          try { return send(res, 200, { presets: existsSync(presetsFile) ? JSON.parse(readFileSync(presetsFile, 'utf8')) : [] }) }
+          catch { return send(res, 200, { presets: [], error: 'watcher.animations.json isn’t valid JSON' }) }
+        }
+        if (req.method !== 'POST' || (req.url !== '/apply' && req.url !== '/css' && req.url !== '/presets')) return send(res, 404, { error: 'not found' })
         // it writes files: only same-origin requests carrying our header (blocks cross-site POSTs to localhost)
         const origin = req.headers.origin
         if (req.headers['x-watcher'] !== '1' || (origin && new URL(origin).host !== req.headers.host)) return send(res, 403, { error: 'forbidden' })
+        if (req.url === '/presets') {
+          try {
+            const { presets } = JSON.parse(await body(req)) as { presets: unknown }
+            if (!Array.isArray(presets)) return send(res, 400, { error: 'presets must be a list' })
+            // Infinity (repeat forever) travels through JSON as a marker string
+            const revive = (v: unknown) => JSON.parse(JSON.stringify(v ?? null), (_, x) => (x === '__Infinity__' ? Infinity : x))
+            const clean = presets.slice(0, 200).flatMap(p => {
+              const name = typeof p?.name === 'string' ? p.name.trim().slice(0, 60) : ''
+              const anim = name ? sanitizeAnim(revive(p.anim)) : null
+              return anim ? [{ name, anim }] : []
+            })
+            writeFileSync(presetsFile, JSON.stringify(clean, (_, x) => (x === Infinity ? '__Infinity__' : x), 2) + '\n')
+            return send(res, 200, { presets: clean.length })
+          } catch (err) { return send(res, 400, { error: String((err as Error).message ?? err) }) }
+        }
         if (req.url === '/css') {
           // keyframe declarations in the stylesheet a rule came from, and variables in the theme file
-          type CssEdit = { kind: 'keyframes'; file: string; name: string; offset: string; prop: string; value: string | null } | { kind: 'theme'; name: string; value: string }
+          type CssEdit = { kind: 'keyframes'; file: string; name: string; offset: string; prop: string; value: string | null }
+            | { kind: 'theme'; name: string; value: string }
+            | { kind: 'keyframes-block'; file?: string; name: string; css: string | null; fresh?: boolean }
           try {
             const { edits, dryRun } = JSON.parse(await body(req)) as { edits: CssEdit[]; dryRun?: boolean }
             const texts = new Map<string, { before: string; now: string }>()
             const results = edits.map(e => {
-              const abs = e.kind === 'theme' ? themeFile(root) : resolve(root, e.file)
+              const abs = e.kind === 'keyframes' || (e.kind === 'keyframes-block' && e.file) ? resolve(root, (e as { file: string }).file) : themeFile(root)
               if (!abs || !editable(abs, /\.css$/)) return { ok: false, error: e.kind === 'theme' ? 'no stylesheet with a Tailwind @theme or tailwindcss import found' : 'not an editable stylesheet' }
               const t = texts.get(abs) ?? { before: readFileSync(abs, 'utf8'), now: '' }
               const cur = t.now || t.before
+              let name: string | undefined
               if (e.kind === 'theme') t.now = setThemeVar(cur, e.name, e.value)
-              else { const r = editKeyframes(cur, e.name, e.offset, e.prop, e.value); if ('error' in r) return { ok: false, error: r.error }; t.now = r.css }
+              else if (e.kind === 'keyframes-block') {
+                if (!/^[\w-]+$/.test(e.name)) return { ok: false, error: 'a keyframes name is letters, digits and dashes' }
+                const r = setKeyframesBlock(cur, e.name, e.css, e.fresh); t.now = r.css; name = r.name
+              } else { const r = editKeyframes(cur, e.name, e.offset, e.prop, e.value); if ('error' in r) return { ok: false, error: r.error }; t.now = r.css }
               texts.set(abs, t)
-              return { ok: true, file: relative(root, abs).split(sep).join('/') }
+              return { ok: true, file: relative(root, abs).split(sep).join('/'), name }
             })
             if (!dryRun) for (const [abs, t] of texts) if (t.now && t.now !== t.before) writeFileSync(abs, t.now)
             return send(res, 200, { results })

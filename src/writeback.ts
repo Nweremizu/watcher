@@ -13,6 +13,7 @@ export type ElementEdit = {
   props?: Record<string, unknown> // component props, written where the component is used; null removes one.
                                    // A dotted name edits inside an object prop: 'transition.duration'
   classes?: string[] // utilities to add (an animation preset); ones of the same kind and variant are replaced
+  removeClasses?: string[] // utilities to take off first (the classes behind an animation being rewritten)
   motion?: string // make a plain element a motion one (<div> → <motion.div>), importing `motion` from this package
 }
 export type EditResult = {
@@ -156,7 +157,7 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       r.note = `now <${tag}>`
     }
 
-    if ((e.styles && Object.keys(e.styles).length) || e.classes?.length) {
+    if ((e.styles && Object.keys(e.styles).length) || e.classes?.length || e.removeClasses?.length) {
       const attr = op.attributes.find(a => a.type === 'JSXAttribute' && a.name.name === 'className')
       // where the class string lives: a plain string, a static template, or the first string passed to cn()/clsx()
       let lit: (N & { value?: string; quasis?: (N & { value: { raw: string } })[] }) | null = null
@@ -169,7 +170,14 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       }
       if (attr && !lit) { r.ok = false; r.error = 'className is computed at runtime; edit it by hand'; continue }
       const before = lit ? (lit.type === 'TemplateLiteral' ? lit.quasis![0].value.raw : lit.value ?? '') : ''
-      const m = mergeClasses(before, e.styles ?? {}, e.variant ?? '', ver)
+      let base = before
+      if (e.removeClasses?.length) {
+        const gone = new Set(e.removeClasses), tokens = before.split(/\s+/).filter(Boolean)
+        const missing = e.removeClasses.filter(c => !tokens.includes(c))
+        if (missing.length) r.note = `${missing.join(' ')} ${missing.length === 1 ? 'isn’t' : 'aren’t'} in this className (it comes from elsewhere); left as is`
+        base = tokens.filter(t => !gone.has(t)).join(' ')
+      }
+      const m = mergeClasses(base, e.styles ?? {}, e.variant ?? '', ver)
       if (e.classes?.length) m.className = addClasses(m.className, e.classes)
       r.before = before; r.after = m.className; r.mapped = m.mapped; r.skipped = m.skipped
       if (m.className !== before) {
@@ -192,8 +200,10 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
         if (typeof value !== 'string') { skip('only text children are written'); continue }
         const err = writeText(value)
         if (err) { skip(err); continue }
+      } else if (value == null) {
+        setAttr(name, null) // removing a prop works whatever it was written as
       } else {
-        if (value != null && !['string', 'number', 'boolean'].includes(typeof value)) { skip('only text, numbers and booleans are written'); continue }
+        if (!['string', 'number', 'boolean'].includes(typeof value)) { skip('only text, numbers and booleans are written'); continue }
         const a = attrOf(name)
         if (a?.value && !isLiteral(a.value)) { skip('set by an expression in your code; edit it by hand'); continue }
         setAttr(name, value)

@@ -213,9 +213,63 @@ The **Default · Hover · Focus · Active** bar at the top of the inspector show
 
 ## Animation
 
-**The Animate tab** (inspector → Animate) shows the selected element's motion and lets you tune it live:
+### Animations: what an element already does
 
-- **Transition:** which properties animate, plus duration, delay and easing. **Play Hover / Focus / Active** runs the transition by forcing that state for a moment, so you never have to move the mouse to see it.
+The **Animations** list at the top of the Animate tab says, in plain words, every animation the selected element has, wherever it comes from:
+
+| Source | Read from |
+|---|---|
+| Motion (`motion.*` elements) | `initial`, `animate`, `whileHover`, `whileTap`, `whileFocus`, `whileInView`; objects or variant labels; keyframe arrays with `times`; `transition` on the target, on the element, `transition.default`. A child that only has `variants` follows the labels of the nearest Motion parent (staggered lists). |
+| Tailwind | hover, press (`active:`), focus and enter (`starting:`) changes, including `group-hover:`; `animate-*` keyframe animations, built-in or `animate-[…]` |
+| Plain CSS | the same, for any stylesheet: `:hover` rules, `@starting-style`, `@keyframes` |
+
+For example: *On hover · Tailwind: shadow changes · 150ms ease-in-out*, *On enter · Motion: fades in and rises 8px · spring 0.3s*, *Loop · Tailwind · pulse: opacity 1 → 0.5 → 1 · 2s*.
+
+**How it reads them:**
+
+- **Values come from the browser.** Watcher forces each state for an instant, with every transition switched off, and compares the computed styles. Theme values, CSS variables, `calc()`, `group-hover:`, CSS modules and plain CSS all read exactly.
+- **The pointer doesn't sway it.** The page's real `:hover`, `:active` and `:focus` rules are muted during the read, and restored in the same instant.
+- **Running animations don't either.** An element's own values are read from an unanimated copy beside it, so a running animation is never restarted.
+- **Classes are structure only.** The className just says which classes are behind each animation, so an edit replaces exactly those.
+
+It also points out what's quietly wrong. For example, a property that changes on hover but isn't in `transition-property` (it jumps instead of animating), or Motion props it can't show (motion values, functions, animation controls).
+
+**▶** plays an animation the way it really runs: Motion's own gestures, the forced CSS state, `@starting-style` (by re-showing the element), or keyframes.
+
+### Custom animations
+
+**New animation**, or **Edit** on any listed animation, opens the builder:
+
+- **Trigger:** On enter, On hover, On press, On focus, In view, or Loop.
+- **Write as:**
+  - **Motion** (when your project has it).
+  - **Tailwind.**
+  - **CSS**, to keep plain-CSS keyframes as plain CSS.
+- **Keyframes:** a track with as many steps as you like. Add a keyframe after the selected one, move it to any percentage, and give it any values: opacity, x, y, scale, rotate, filter, colours, shadow, radius or any other CSS property. A gesture's first keyframe can stay empty, which means "from however it looks now".
+- **Timing:** tween (duration, a Motion easing or a curve you drag) or spring (duration and bounce, or physics, with a preview curve), plus delay and repeat (forever, a number of times, back and forth).
+- **Preview** plays it on the element. It reads as a sentence as you build it, and the panel shows exactly what will be written before you write it.
+
+**Save to code** writes it in the system you picked, as small an edit as it can:
+
+- **Tailwind:** a value that didn't change keeps the class it was written with (`hover:shadow-lg` stays `hover:shadow-lg`), and only what changed is replaced. Timing is shared by an element's CSS state changes, so the transition list grows to cover what each one needs. A simple from–to becomes utilities (`hover:-translate-y-1`, `starting:opacity-0`). Steps, loops, and enter on Tailwind v3 become a `@keyframes` block plus one `animate-[name_400ms_…]` class. The block goes where the name is already defined, or in your theme stylesheet. A name that belongs to Tailwind or a package (`pulse`) gets a fresh one (`pulse-2`) rather than overriding it everywhere.
+- **Motion:** only changed keys are written, into the objects and same-file variant constants where they already live. A transition shared by several animations is copied into the edited one, so editing one doesn't retime the others. A plain element becomes `motion.*`, with `motion` imported. In view adds `viewport={{ once: true }}`.
+- **Switching systems** (Tailwind → Motion or back) removes the old classes or props.
+
+**Delete** removes an animation from the code. **Save as preset…** stores it in `watcher.animations.json` at your project root; commit it and the team shares the presets. Built-in starting points include Fade in, Slide up, Scale in, Icon swap, Press, Hover lift, Reveal on scroll, Float and Pulse.
+
+Limits:
+
+- **In view needs JavaScript**, so it's Motion only.
+- **One `animate` at a time:** Motion runs one per element, so an element can't have both an enter and a loop. Watcher says so and suggests a wrapper.
+- **Inherited animations:** for one that follows a Motion parent's labels, only its values are edited, in its own variants.
+- **Plain-CSS rules stay put:** when a plain-CSS animation is rewritten as Tailwind or Motion, the original rule stays until you remove it.
+
+### Fine-tune
+
+The raw controls sit under **Fine-tune**, collapsed by default:
+
+
+- **Transition:** which properties animate, plus duration, delay and easing, edited live. **Play Hover / Focus / Active** runs the transition by forcing that state for a moment, so you never have to move the mouse to see it.
 - **Keyframe animations** (Tailwind's `animate-*` or your own `@keyframes`): duration, delay, repeat, direction, fill, easing, the keyframes themselves, and **Replay**.
 - **Easing editor:** drag the curve's two handles, or pick a preset. Ease out comes first, because state changes should respond at once and then settle. Your theme's `--ease-*` tokens are offered too, and a small dot previews the curve at the element's own duration.
 - **Motion checks:**
@@ -263,26 +317,9 @@ Select a `motion.div` (or any `motion.*` / `m.*` element) and the Animate tab ad
 
 Edits apply live and are undoable. **Apply to code** writes them into the JSX objects where you wrote them (`transition={{ type: "spring", bounce: 0.2 }}`), adding missing keys. When the prop is a constant in the same file (`variants={item}`, with `const item = { … }`, `as const` / `satisfies` included), the constant itself is edited. Values computed by expressions are left for you.
 
-### Adding animations
-
-**Add animation** (at the bottom of the Animate tab) offers five presets, tuned to feel responsive:
-
-| Preset | Motion | Tailwind |
-|---|---|---|
-| Fade in | `initial={{ opacity: 0 }}` → `animate`, 0.3s ease-out | `transition-opacity duration-300 ease-out starting:opacity-0` |
-| Slide up | 8px up while fading in, spring with bounce 0 | `starting:opacity-0 starting:translate-y-2` + transition |
-| Scale in | from 95% while fading in, spring with bounce 0 | `starting:opacity-0 starting:scale-95` + transition |
-| Press | `whileTap={{ scale: 0.96 }}` | `active:scale-[0.96] transition-transform` |
-| Hover lift | `whileHover={{ y: -2 }}` | `hover:-translate-y-0.5 transition-transform` |
-
-Clicking a preset previews it on the element (a Motion spring previews with its real curve), and shows exactly what it will add. **Add to code** writes it to the source straight away. Changing an element's type can't be previewed live, so presets go to your code instead of the Code panel, and your editor's undo takes them back.
-
-- **Motion** (the default when your project has `motion` or `framer-motion`): a plain `<div>` becomes `<motion.div>`, and `motion` is imported from the package you use. Props are merged into objects that are already there. After hot reload, the element shows up in the Motion sections, ready to tune.
-- **Tailwind:** the classes are added, and ones of the same kind are replaced (`duration-150` → `duration-300`). Transition lists are combined: adding Press to a card with `transition-shadow` gives `transition-[box-shadow,transform,…]`, so the hover shadow keeps animating. Enter presets use Tailwind's `starting:` variant (CSS `@starting-style`), so no keyframes are needed. They play when the element appears.
-
 ### Keyframes and theme tokens
 
-**Keyframes:** a `@keyframes` section shows a track with a diamond for each keyframe. Pick one to edit, add or remove its values, or add a keyframe at any percentage. Edits apply to the page's stylesheet as you type, and they're undoable. **Apply to code** writes them to the CSS file Vite served the rule from, changing only that declaration. Keyframes that come from Tailwind or a package (like `pulse`) can't be edited where they live; copy them into your CSS first.
+**Keyframes** (under Fine-tune): a `@keyframes` section shows a track with a diamond for each keyframe. Pick one to edit, add or remove its values, or add a keyframe at any percentage. Edits apply to the page's stylesheet as you type, and they're undoable. **Apply to code** writes them to the CSS file Vite served the rule from, changing only that declaration. Keyframes that come from Tailwind or a package (like `pulse`) can't be edited where they live; copy them into your CSS first.
 
 **Theme tokens:** under the easing editor, **Save as a theme token…** adds the curve to your Tailwind theme as `--ease-<name>`. That goes in the first `@theme` block, or a new one after your imports. The element then uses it, and writes back as `ease-<name>`.
 
@@ -341,7 +378,7 @@ Edits you haven't applied yet, added elements, guides and canvas mode are saved 
 | | |
 |---|---|
 | **Production** | 0 bytes with Vite and webpack: the package's `production` export condition resolves to an empty module. Other bundlers still emit the lazy chunk, but a `NODE_ENV` check means it never loads. |
-| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~96 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
+| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~103 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
 | **Open** | It runs in its own shadow root and React root, so your app's CSS can't reach it and it never re-renders your tree. It redraws only when something it shows actually moved. |
 
 ## Features

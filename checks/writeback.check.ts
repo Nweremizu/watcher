@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { cssToTailwind, mergeClasses } from '../src/tailwind.ts'
 import { editSource, stampSource } from '../src/writeback.ts'
-import { forceSelectors } from '../src/states.ts'
+import { forceSelectors, muteSelectors } from '../src/states.ts'
 
 const tw = (p: string, v: string, ver: 3 | 4 = 4) => { const r = cssToTailwind(p, v, ver); return 'cls' in r ? r.cls : `!${r.reason}` }
 
@@ -154,10 +154,21 @@ assert.equal(add('transition hover:translate-y-1', ['transition-transform', 'hov
 assert.equal(add('', ['transition-[opacity,translate]', 'starting:opacity-0', 'starting:translate-y-2']), 'transition-[opacity,translate] starting:opacity-0 starting:translate-y-2')
 assert.equal(add('transition-opacity', ['transition-transform']), 'transition-[opacity,transform,translate,scale,rotate]')
 
+// rewriting an animation: its classes come off, the new ones go on; a prop can be removed whatever it was written as
+out = editSource(`const a = <b className="p-2 transition-shadow hover:shadow-lg hover:-translate-y-0.5" />`, [{ loc: '1:10', removeClasses: ['transition-shadow', 'hover:-translate-y-0.5', 'hover:opacity-90'], classes: ['transition-[box-shadow,translate]', 'hover:-translate-y-1'] }])
+assert.ok(out.code.includes('className="p-2 hover:shadow-lg transition-[box-shadow,translate] hover:-translate-y-1"'), out.code)
+assert.ok(out.results[0].note?.includes('hover:opacity-90'))
+out = editSource(msrc, [{ loc: '3:23', props: { whileTap: null, transition: null } }])
+assert.ok(out.code.includes('<motion.div data-wsrc') === false && out.code.includes('<motion.div className="p-2" variants={item} />'), out.code)
+
 // forced states: rewrite pseudo-classes, but not escaped class names or media features
 assert.equal(forceSelectors('.btn:hover{color:red}'), '.btn[data-wforce~="hover"]{color:red}')
 assert.equal(forceSelectors('.hover\:bg-x{&:hover{@media (hover:hover){color:red}}}'), '.hover\:bg-x{&[data-wforce~="hover"]{@media (hover:hover){color:red}}}')
 assert.equal(forceSelectors('a:focus-visible, a:focus, .g:focus-within'), 'a[data-wforce~="focus-visible"], a[data-wforce~="focus"], .g[data-wforce~="focus-within"]')
 assert.equal(forceSelectors('.focus\:ring:focus'), '.focus\:ring[data-wforce~="focus"]')
+
+assert.equal(muteSelectors('.group:hover .group-hover\:bg-x'), '.group:not(*) .group-hover\:bg-x')
+assert.equal(muteSelectors('a:not(:hover)'), 'a:not(:not(*))') // never hovered: :not(:hover) still matches
+assert.equal(muteSelectors('.hover\:x'), '.hover\:x')
 
 console.log('writeback checks ok')

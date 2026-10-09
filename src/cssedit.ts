@@ -49,6 +49,24 @@ export function editKeyframes(css: string, name: string, offset: string, prop: s
   return { css: css.slice(0, close).replace(/\s*$/, '') + `\n${pad}${offset} { ${prop}: ${value}; }\n${indentOf(css, m.index)}` + css.slice(close) }
 }
 
+/** Replace a whole `@keyframes name { … }` block, add it at the end, or (block null) remove it. With `fresh`, a name
+ *  that isn't in this file (Tailwind's own `pulse`, a package's) isn't overridden: the block gets a free name instead. */
+export function setKeyframesBlock(css: string, name: string, block: string | null, fresh = false): { css: string; name: string } {
+  const find = (n: string) => new RegExp(`@keyframes\\s+${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css)
+  const rename = (b: string, n: string) => b.replace(/^@keyframes\s+[\w-]+/, `@keyframes ${n}`)
+  const m = find(name)
+  if (m) {
+    const close = closeOf(css, m.index + m[0].length - 1)
+    if (close < 0) return { css, name }
+    if (block == null) return { css: css.slice(0, m.index).replace(/\n+$/, '\n') + css.slice(close + 1).replace(/^\n/, ''), name }
+    return { css: css.slice(0, m.index) + rename(block, name) + css.slice(close + 1), name }
+  }
+  if (block == null) return { css, name }
+  let n = name
+  if (fresh) { n = `${name}-2`; for (let i = 3; find(n); i++) n = `${name}-${i}` }
+  return { css: css.replace(/\s*$/, '\n\n') + rename(block, n) + '\n', name: n }
+}
+
 /** Set a variable in the first @theme block, or add an @theme block after the imports. */
 export function setThemeVar(css: string, name: string, value: string): string {
   const m = /@theme(\s+[a-z\s]+)?\s*\{/.exec(css)

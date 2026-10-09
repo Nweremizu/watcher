@@ -225,3 +225,14 @@ export function addClasses(className: string, add: string[]) {
   }
   return tokens.join(' ')
 }
+/** What a transition utility transitions: a property list, '*' for everything (transition, transition-all), or null. */
+export function transitionCovers(cls: string): string[] | '*' | null {
+  if (cls === 'transition' || cls === 'transition-all') return '*'
+  if (cls === 'transition-none') return []
+  return transitionSet(cls) ?? null
+}
+/** The utility for a set of properties: a named one when it matches (transition-opacity), else transition-[a,b]. */
+export function transitionClass(props: string[]) {
+  const all = [...new Set(props)]
+  return Object.entries(TRANSITION_SETS).find(([, set]) => same(set, all))?.[0] ?? `transition-[${all.join(',')}]`
+}

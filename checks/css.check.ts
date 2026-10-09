@@ -1,6 +1,6 @@
 // node checks/css.check.ts: these write the user's CSS files, so they get a runnable check.
 import assert from 'node:assert/strict'
-import { editKeyframes, setThemeVar } from '../src/cssedit.ts'
+import { editKeyframes, setKeyframesBlock, setThemeVar } from '../src/cssedit.ts'
 
 const kf = `.a { color: red; }
 @keyframes float {
@@ -27,5 +27,14 @@ assert.ok(setThemeVar(theme, '--ease-snappy', 'linear').includes('--ease-snappy:
 assert.ok(setThemeVar(theme, '--ease-soft', 'ease').includes('  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);\n  --ease-soft: ease;\n}'))
 assert.equal(setThemeVar('@import "tailwindcss";\n.a {}\n', '--ease-soft', 'ease'), '@import "tailwindcss";\n\n@theme {\n  --ease-soft: ease;\n}\n.a {}\n')
 assert.equal(setThemeVar('.a {}\n', '--x', '1'), '@theme {\n  --x: 1;\n}\n\n.a {}\n')
+
+// whole @keyframes blocks: replace, add, remove; never override one defined elsewhere (Tailwind's pulse)
+const block = '@keyframes float {\n  0% { translate: 0px 0px; }\n}'
+assert.equal(setKeyframesBlock(kf, 'float', block).css, '.a { color: red; }\n' + block + '\n')
+assert.deepEqual(setKeyframesBlock('.a {}\n', 'wiggle', block.replace('float', 'wiggle')), { css: '.a {}\n\n@keyframes wiggle {\n  0% { translate: 0px 0px; }\n}\n', name: 'wiggle' })
+assert.equal(setKeyframesBlock('.a {}', 'pulse', block, true).name, 'pulse-2')
+assert.ok(setKeyframesBlock('.a {}', 'pulse', block, true).css.includes('@keyframes pulse-2 {'))
+assert.equal(setKeyframesBlock('@keyframes pulse-2 {}\n', 'pulse', block, true).name, 'pulse-3')
+assert.equal(setKeyframesBlock(kf, 'float', null).css, '.a { color: red; }\n')
 
 console.log('css checks ok')

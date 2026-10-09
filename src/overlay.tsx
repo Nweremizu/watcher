@@ -782,7 +782,7 @@ function ColorPicker({ value, anchor, onChange, onClose }: { value: string; anch
   const fromCss = (v: string) => { if (!CSS.supports('color', v)) return; const c = rgba(v); set([...rgbToHsv(c.r, c.g, c.b), c.a]) }
   if (!ds.elements) scanStyles() // the page palette below needs one scan
   const palette = paletteSort(ds.colors).slice(0, 16)
-  const W = 240, left = Math.min(Math.max(8, anchor.right - W), innerWidth - W - 8)
+  const W = 248, left = Math.min(Math.max(8, anchor.right - W), innerWidth - W - 8)
   const top = anchor.bottom + 360 > innerHeight ? Math.max(8, anchor.top - 356) : anchor.bottom + 6
   return createPortal(
     <>
@@ -3079,17 +3079,19 @@ button.sw:hover i { box-shadow: inset 0 0 0 1px oklch(0% 0 0/.12), 0 0 0 9px okl
 
 /* colour picker */
 .backdrop.fixed { position: fixed; z-index: 19; }
-.cp { position: fixed; z-index: 20; width: 240px; padding: 12px; display: grid; gap: 10px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-overlay, var(--shadow-raised)), 0 0 0 1px var(--border); }
+.cp { position: fixed; z-index: 20; width: 248px; padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-overlay, var(--shadow-raised)), 0 0 0 1px var(--border); }
 .cp-sv { position: relative; height: 156px; border-radius: 8px; cursor: crosshair; touch-action: none; box-shadow: inset 0 0 0 1px oklch(0% 0 0/.08); }
-.cp-bar { position: relative; height: 12px; border-radius: 6px; cursor: pointer; touch-action: none; box-shadow: inset 0 0 0 1px oklch(0% 0 0/.08); }
+.cp-bar { position: relative; height: 12px; margin: 0 7px; border-radius: 6px; cursor: pointer; touch-action: none; box-shadow: inset 0 0 0 1px oklch(0% 0 0/.08); }
 .cp-hue { background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
 .cp-alpha { background-size: 100% 100%, 8px 8px; }
 .cp-thumb { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px oklch(0% 0 0/.35), 0 1px 3px oklch(0% 0 0/.3); pointer-events: none; }
 .cp-bar .cp-thumb { top: 50%; }
-.cp-row { display: flex; align-items: center; gap: 6px; }
-.cp-row .f { flex: 1; min-width: 0; }
-.cp-row .sw.big { width: 26px; }
-.cp-a { width: 64px; flex: none; }
+/* fixed columns: dropper · swatch · hex (flexible) · alpha, so the row can never outgrow the popover */
+.cp-row { display: grid; grid-template-columns: 28px 28px minmax(0, 1fr) 68px; align-items: center; gap: 6px; min-width: 0; }
+.cp-row > * { min-width: 0; }
+.cp-row .sw.big { width: 28px; height: 28px; border-radius: 7px; }
+.cp-row .f input { width: 100%; text-transform: uppercase; }
+.cp-row .b.sm { width: 28px; padding: 0; }
 .cp-cap { font-size: 11px; font-weight: 600; color: var(--text-x); margin-bottom: -4px; }
 .cp-sws { display: flex; flex-wrap: wrap; gap: 5px; }
 .cp-sws button { all: unset; width: 20px; height: 20px; border-radius: 5px; cursor: pointer; box-shadow: inset 0 0 0 1px oklch(0% 0 0/.12); }

@@ -28,7 +28,7 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "assets/logo.svg"
+    "assets"
   ],
   "peerDependencies": {
     "react": ">=18",

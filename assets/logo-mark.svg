@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>Watcher</title>
+  <style>
+    .ink { stroke: #1D1F24 }
+    @media (prefers-color-scheme: dark) { .ink { stroke: #F4F5F7 } }
+  </style>
+  <g transform="translate(32 32)" fill="none" stroke-width="3.4" stroke-miterlimit="10">
+    <!-- the eye: two lids, each ending in a bar into the spark (point-symmetric, an S) -->
+    <path class="ink" d="M15.8 -15.8C5 -21 -21 -14 -25 0H-10"/>
+    <path class="ink" d="M15.8 -15.8C5 -21 -21 -14 -25 0H-10" transform="rotate(180)"/>
+    <!-- the spark / anchor point, with a pinched-diamond counter -->
+    <path fill="#F38020" fill-rule="evenodd" d="M-1.7 -11.5H1.7A9.8 9.8 0 0 0 11.5 -1.7V1.7A9.8 9.8 0 0 0 1.7 11.5H-1.7A9.8 9.8 0 0 0 -11.5 1.7V-1.7A9.8 9.8 0 0 0 -1.7 -11.5ZM0 -4.6A15 15 0 0 0 4.6 0A15 15 0 0 0 0 4.6A15 15 0 0 0 -4.6 0A15 15 0 0 0 0 -4.6Z"/>
+  </g>
+</svg>

@@ -6,6 +6,6 @@ import './demo.css'
 createRoot(document.getElementById('root')!).render(
   <>
     <App />
-    <Watcher />
+    <Watcher font="/public-fonts/TimelessSansVF.woff2" />
   </>,
 )

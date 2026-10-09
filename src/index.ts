@@ -25,13 +25,18 @@ const later = (fn: () => void) => {
 let unmount: (() => void) | null = null
 let users = 0
 
+export type WatcherOptions = {
+  /** URL of a Timeless Sans woff2 served by your app, used for Watcher's UI. Optional; never bundled. */
+  font?: string
+}
+
 /** Load and mount Watcher without React components (or from any framework). Returns a cleanup function. */
-export function mountWatcher(): () => void {
+export function mountWatcher(options: WatcherOptions = {}): () => void {
   // inside a responsive preview frame (window.name 'watcher-viewport') this mounts the overlay's frame mode
   if (isProd || typeof window === 'undefined') return () => {}
   users++
   let cancelled = false
-  const load = () => { void import('./overlay').then(m => { if (!cancelled && !unmount) unmount = m.mount() }) }
+  const load = () => { void import('./overlay').then(m => { if (!cancelled && !unmount) unmount = m.mount(options) }) }
   const wasOpen = (() => { try { return sessionStorage.getItem('watcher') === '1' } catch { return false } })()
   const cancel = wasOpen ? (load(), () => {}) : later(load)
   return () => {
@@ -42,8 +47,8 @@ export function mountWatcher(): () => void {
 }
 
 /** Drop it anywhere in your tree. Renders nothing itself; Alt+D toggles the overlay. */
-export function Watcher(): null {
-  useEffect(mountWatcher, [])
+export function Watcher({ font }: WatcherOptions = {}): null {
+  useEffect(() => mountWatcher({ font }), [font])
   return null
 }
 

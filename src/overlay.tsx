@@ -2702,7 +2702,9 @@ function UrlField({ href, onGo }: { href: string; onGo: (url: string) => void })
 declare const __VERSION__: string
 /** Mount the overlay in its own shadow root + React root, outside the app's tree (so zooming <body> never
  *  scales it and the app's CSS never leaks in). Returns the unmount function. Idempotent. */
-export function mount(): () => void {
+/** `font`: URL of a Timeless Sans woff2 your app serves. Watcher never ships the font itself (its license forbids
+ *  redistribution); without it, an installed "Timeless Sans" is used, else the system UI font. */
+export function mount({ font }: { font?: string } = {}): () => void {
   if (HOST || (FRAME && !parentHost)) return () => {} // a preview frame needs the Watcher page around it
   const host = document.createElement('watcher-ui')
   host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;display:block'
@@ -2713,9 +2715,13 @@ export function mount(): () => void {
   shadow.append(style, el)
   document.documentElement.appendChild(host)
   HOST = host
+  // @font-face doesn't work inside a shadow root, so the face is declared on the page
+  const face = document.createElement('style')
+  face.textContent = `@font-face { font-family: "Watcher UI"; src: local("Timeless Sans")${font ? `, url(${JSON.stringify(font)}) format("woff2")` : ''}; font-weight: 100 900; font-display: swap; }`
+  document.head.appendChild(face)
   const root = createRoot(el)
   root.render(<Overlay />)
-  return () => { HOST = null; host.remove(); setTimeout(() => root.unmount()) }
+  return () => { HOST = null; host.remove(); face.remove(); setTimeout(() => root.unmount()) }
 }
 
 // ── styles ──────────────────────────────────────────────────────────────────
@@ -2732,7 +2738,7 @@ const CSS_TEXT = `
 * { box-sizing: border-box; }
 .root {
   position: fixed; inset: 0; pointer-events: none;
-  font: 500 12px/16px Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 500 12px/16px "Watcher UI", "Timeless Sans", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--text); -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
   --primary: #f38020; --on-primary: #fff;
   --primary-soft: color-mix(in oklch, var(--primary) 16%, transparent);
@@ -2799,7 +2805,8 @@ const CSS_TEXT = `
 
 /* stage */
 .stage { position: absolute; inset: 0; overflow: visible; }
-.stage .hov { fill: none; stroke: var(--primary); stroke-width: 1; }
+/* hover = dashed, selection = solid */
+.stage .hov { fill: none; stroke: var(--primary); stroke-width: 1.25; stroke-dasharray: 4 3; }
 .stage .selr { fill: none; stroke: var(--primary); stroke-width: 1.5; }
 .stage .mg { fill: oklch(82% .14 85 / .22); }
 .stage .pd { fill: oklch(75% .14 150 / .2); }
@@ -2810,7 +2817,6 @@ const CSS_TEXT = `
 .hd { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px; background: #fff; border: 1.5px solid var(--primary); border-radius: 2px; pointer-events: auto; }
 .hd.e, .hd.w { cursor: ew-resize; } .hd.n, .hd.s { cursor: ns-resize; } .hd.nw, .hd.se { cursor: nwse-resize; } .hd.ne, .hd.sw { cursor: nesw-resize; }
 .stage .snap { stroke: oklch(63% .24 15); stroke-width: 1; }
-.stage .hov.dash { stroke-dasharray: 4 3; }
 .stage .pe-line { fill: none; stroke: var(--primary); stroke-width: 1.5; }
 .stage .pe-hit { fill: none; stroke: transparent; stroke-width: 10; pointer-events: stroke; cursor: copy; }
 .stage .pe-a { fill: var(--surface); stroke: var(--primary); stroke-width: 1.5; pointer-events: all; cursor: move; }
@@ -3119,7 +3125,7 @@ button.sw:hover i { box-shadow: inset 0 0 0 1px oklch(0% 0 0/.12), 0 0 0 9px okl
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { all: unset; box-sizing: border-box; height: 24px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; border-radius: 6px; background: var(--input); color: var(--text); font: 500 11px var(--mono); cursor: pointer; }
 .chip:hover { box-shadow: inset 0 0 0 1px var(--primary); }
-.cnt { flex: none; font-size: 10px; color: var(--text-x); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+.cnt { flex: none; font-size: 10px; color: var(--text-x); font-family: "Watcher UI", "Timeless Sans", Inter, ui-sans-serif, system-ui, sans-serif; }
 .list { display: grid; gap: 1px; margin: 0 -6px; }
 .dsrow { all: unset; box-sizing: border-box; min-width: 0; min-height: 32px; padding: 4px 6px; display: flex; align-items: center; gap: 10px; border-radius: 6px; color: var(--text); cursor: pointer; }
 .dsrow:hover { background: var(--hover); }

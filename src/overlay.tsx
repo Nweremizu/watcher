@@ -2245,6 +2245,8 @@ type InspectorProps = {
   guide: Guide | null; updateGuide: (p: Partial<Guide>) => void; removeGuide: () => void
   theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void; onClose: () => void; onCode: () => void
 }
+// ponytail: the Animate tab is unfinished, so it's hidden until it ships; flip this to bring it back
+const ANIMATE_TAB = false
 let showInspectorTab: (t: 'design' | 'prototype' | 'animate') => void = () => {}
 const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide, removeGuide, theme, setTheme, onClose, onCode }: InspectorProps) {
   void rev // re-render trigger only
@@ -2263,7 +2265,7 @@ const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide,
         <button className="b xs" data-tip="Close panel" onClick={onClose}><Icon d={P.x} size={15} /></button>
       </div>
       {menu && <Settings theme={theme} setTheme={setTheme} onClose={() => setMenu(false)} />}
-      <div className="tabbar"><Seg big value={tab} options={[['design', 'Design'], ['prototype', 'Prototype'], ['animate', 'Animate']] as const} onChange={setTab} /></div>
+      <div className="tabbar"><Seg big value={tab} options={[['design', 'Design'], ['prototype', 'Prototype'], ...(ANIMATE_TAB ? [['animate', 'Animate']] as const : [])] as const} onChange={setTab} /></div>
       <div className="pb">
         {guide ? <GuidePanel g={guide} update={updateGuide} remove={removeGuide} />
           : !el ? <Help />
@@ -4528,7 +4530,7 @@ function Overlay() {
         {!covered && <div className="ablabel" style={{ left: ab.x, top: ab.y }}>{host}{location.pathname}</div>}
         {editing && <SvgEditor area={area} />}
         {resp && !editing && <Responsive area={area} value={resp} onChange={setResp} href={href} inspect={frameInspect} onInspect={setFrameInspect} />}
-        {timeline && !editing && <Timeline area={area} pick={el => { select(el); setRight('inspect'); setShow(v => ({ ...v, inspector: true })); showInspectorTab('animate') }} />}
+        {timeline && !editing && <Timeline area={area} pick={el => { select(el); setRight('inspect'); setShow(v => ({ ...v, inspector: true })); if (ANIMATE_TAB) showInspectorTab('animate') }} />}
 
         {stage}
 

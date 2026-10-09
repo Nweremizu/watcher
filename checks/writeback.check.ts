@@ -109,6 +109,27 @@ assert.deepEqual(out.results[0].props, ['label', 'on', 'children'])
 out = editSource(src, [{ loc: '4:4', props: { title: 'say "hi" & bye' } }])
 assert.ok(out.code.includes('<Card title={"say \\"hi\\" & bye"} />'), out.code)
 
+// Motion: motion.div is stamped like a DOM element; object props are edited in place
+const msrc = `import { motion } from 'motion/react'
+const item = { hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0, transition: { type: 'spring', bounce: 0 } } }
+export const A = () => <motion.div className="p-2" variants={item} transition={{ duration: 0.3, ease: 'easeOut' }} whileTap={{ scale: 0.96 }} />
+`
+assert.ok(stampSource(msrc, 'M.tsx')!.toString().includes('<motion.div data-wsrc="M.tsx:3:23"'))
+assert.ok(!stampSource('const a = <Motion.div />', 'a.tsx')!.toString().includes('data-wsrc="'))
+out = editSource(msrc, [{ loc: '3:23', props: { 'transition.duration': 0.5, 'transition.ease': [0.2, 0, 0, 1], 'transition.repeat': '__Infinity__', 'whileTap.scale': 0.95 } }])
+assert.ok(out.code.includes(`transition={{ duration: 0.5, ease: [0.2, 0, 0, 1], repeat: Infinity }}`), out.code)
+assert.ok(out.code.includes(`whileTap={{ scale: 0.95 }}`), out.code)
+// variants={item}: edited where the const is declared, missing keys added
+out = editSource(msrc, [{ loc: '3:23', props: { 'variants.visible.transition.bounce': 0.2, 'variants.visible.transition.visualDuration': 0.4, 'variants.hidden.y': null } }])
+assert.ok(out.code.includes(`visible: { opacity: 1, y: 0, transition: { type: 'spring', bounce: 0.2, visualDuration: 0.4 } }`), out.code)
+assert.ok(out.code.includes(`hidden: { opacity: 0 }`), out.code)
+// a new object prop, and ones Watcher won't guess at
+out = editSource(msrc, [{ loc: '3:23', props: { 'animate.opacity': 1, 'className.x': 1 } }])
+assert.ok(out.code.includes(`<motion.div animate={{ opacity: 1 }} className="p-2"`), out.code)
+assert.deepEqual(out.results[0].skipped.map(s => s.prop), ['className.x'])
+out = editSource(`const x = <motion.div transition={{ duration: d }} />`, [{ loc: '1:10', props: { 'transition.duration': 1 } }])
+assert.deepEqual(out.results[0].skipped.map(s => s.prop), ['transition.duration'])
+
 // forced states: rewrite pseudo-classes, but not escaped class names or media features
 assert.equal(forceSelectors('.btn:hover{color:red}'), '.btn[data-wforce~="hover"]{color:red}')
 assert.equal(forceSelectors('.hover\:bg-x{&:hover{@media (hover:hover){color:red}}}'), '.hover\:bg-x{&[data-wforce~="hover"]{@media (hover:hover){color:red}}}')

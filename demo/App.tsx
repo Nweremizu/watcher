@@ -1,4 +1,5 @@
 import { useSyncExternalStore, type ReactNode } from 'react'
+import { motion, type Variants } from 'motion/react'
 
 // ponytail: a 10-line pushState router so the demo has real pages; a real app would use React Router
 const subscribe = (cb: () => void) => { addEventListener('popstate', cb); return () => removeEventListener('popstate', cb) }
@@ -21,29 +22,32 @@ function Hero() {
   return (
     <header className="hero">
       <span className="mb-4 inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-sm text-[#555] shadow-[0_0_0_1px_#eee]"><i className="size-2 rounded-full bg-[#22c55e] animate-pulse" />All systems normal</span>
-      <h1>Ship faster at the edge</h1>
+      <motion.h1 initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ type: 'spring', visualDuration: 0.4, bounce: 0 }}>Ship faster at the edge</motion.h1>
       <p>Deploy serverless code to 300 cities in seconds. No cold starts, no config.</p>
-      <div className="row"><button className="btn">Get started</button><button className="btn ghost">Read docs</button></div>
+      <div className="row"><motion.button className="btn" whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.96 }}>Get started</motion.button><button className="btn ghost">Read docs</button></div>
     </header>
   )
 }
+// the cards come in one after another: the grid staggers, each card springs up from 8px below
+const list = { hidden: {}, visible: { transition: { staggerChildren: 0.06 } } } satisfies Variants
+const item = { hidden: { opacity: 0, y: 8 }, visible: { opacity: 1, y: 0, transition: { type: 'spring', visualDuration: 0.3, bounce: 0 } } } satisfies Variants
 function FeatureCard({ title, body }: { title: string; body: string }) {
   return (
-    <article className="group card rounded-xl bg-white p-5 shadow-[0_0_0_1px_#eee,0_2px_8px_rgba(0,0,0,.04)] transition hover:shadow-[0_0_0_1px_#f38020,0_8px_24px_rgba(0,0,0,.08)]">
+    <motion.article variants={item} className="group card rounded-xl bg-white p-5 shadow-[0_0_0_1px_#eee,0_2px_8px_rgba(0,0,0,.04)] transition-shadow hover:shadow-[0_0_0_1px_#f38020,0_8px_24px_rgba(0,0,0,.08)]">
       <div className="size-8 rounded-lg bg-[#fde6d2] transition group-hover:bg-[#f38020]" />
       <h3 className="mt-3 mb-1.5 text-lg font-bold">{title}</h3>
       <p className="m-0 leading-normal text-[#666]">{body}</p>
-    </article>
+    </motion.article>
   )
 }
 function Overview() {
   return <>
     <Hero />
-    <section className="grid">
+    <motion.section className="grid" variants={list} initial="hidden" animate="visible">
       <FeatureCard title="Workers" body="Run JavaScript at the edge with zero cold starts." />
       <FeatureCard title="KV storage" body="Global, low-latency key-value data for your apps." />
       <FeatureCard title="Images" body="Resize, optimise and serve images from one URL." />
-    </section>
+    </motion.section>
   </>
 }
 function Page({ title, children }: { title: string; children: ReactNode }) {

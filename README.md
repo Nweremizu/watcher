@@ -244,7 +244,32 @@ The **Default · Hover · Focus · Active** bar at the top of the inspector show
 
 The Checks panel also warns when keyframe animations run on a page that has no `prefers-reduced-motion` handling. Use Tailwind's `motion-safe:` or a media query.
 
-Motion (motion.dev) components come next: reading and editing their `animate`/`transition` props, springs, and writing them back.
+### Motion (motion.dev)
+
+Select a `motion.div` (or any `motion.*` / `m.*` element) and the Animate tab adds three sections:
+
+- **States:** `initial`, `animate`, `whileHover`, `whileTap`, `whileFocus`, `whileInView` and `exit`, each with its values (opacity, x, scale…) to scrub, edit, add or remove. A state that names a variant (`animate="visible"`) shows that variant's values.
+- **Motion transition:** Default, Tween or Spring.
+  - **Tween:** duration, plus a Motion easing name or a curve you drag.
+  - **Spring:** duration and bounce, or stiffness, damping and mass, with a live curve of the spring and how long it takes to settle. A new spring starts at bounce 0: it settles without wobbling, which suits interfaces.
+  - **Also:** delay, repeat, and, on the element that runs a variants sequence, stagger and children delay.
+  - **Which transition is edited:** the one that actually drives the animation. That's the transition on the target, otherwise the component's `transition` prop, otherwise the transition inside the variant it animates to.
+- **Variants:** every other variant, editable the same way.
+
+**Play** runs it without touching the page:
+
+- **Enter** jumps to `initial` instantly and plays to `animate` with the current transition. Variant labels are flipped, so staggered children replay too.
+- **Hover**, **Press** and **Focus** trigger Motion's own gestures and hold them for a moment.
+
+Edits apply live and are undoable. **Apply to code** writes them into the JSX objects where you wrote them (`transition={{ type: "spring", bounce: 0.2 }}`), adding missing keys. When the prop is a constant in the same file (`variants={item}`, with `const item = { … }`, `as const` / `satisfies` included), the constant itself is edited. Values computed by expressions are left for you.
+
+**Motion check:** Watcher warns when a CSS transition (often Tailwind's `transition`) covers a property Motion animates. Motion sets that property every frame, each write restarts the CSS transition, and the motion turns mushy. The fix drops those properties from the CSS transition.
+
+**Limits:**
+
+- **Timeline:** Motion runs opacity and similar values in the browser's animation engine, so the timeline shows those as `motion`. Springs on x, y and scale run in JavaScript, so they don't show there and the speed control doesn't slow them. Use Play in the Animate tab for those.
+- **Live edits:** like other prop edits, they hold until the parent re-renders with its own values.
+- **Exit animations:** they run only when the element is removed, so there's no Play button for them.
 
 ## Checks: tokens & accessibility
 
@@ -293,7 +318,7 @@ Edits you haven't applied yet, added elements, guides and canvas mode are saved 
 | | |
 |---|---|
 | **Production** | 0 bytes with Vite and webpack: the package's `production` export condition resolves to an empty module. Other bundlers still emit the lazy chunk, but a `NODE_ENV` check means it never loads. |
-| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~87 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
+| **Development, before opening** | ~0.5 kB gzipped. The overlay is a separate ~92 kB (gzipped) chunk, fetched when the browser is idle so it never competes with your first render. |
 | **Open** | It runs in its own shadow root and React root, so your app's CSS can't reach it and it never re-renders your tree. It redraws only when something it shows actually moved. |
 
 ## Features

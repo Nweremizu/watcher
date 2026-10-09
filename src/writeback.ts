@@ -10,7 +10,8 @@ export type ElementEdit = {
   text?: string
   attrs?: Record<string, string | null>
   variant?: string // Tailwind variant for responsive / state edits, e.g. 'md:' or 'hover:'
-  props?: Record<string, unknown> // component props, written where the component is used; null removes one
+  props?: Record<string, unknown> // component props, written where the component is used; null removes one.
+                                   // A dotted name edits inside an object prop: 'transition.duration'
 }
 export type EditResult = {
   loc: string; ok: boolean; error?: string; note?: string
@@ -36,12 +37,27 @@ export function walk(node: unknown, fn: (n: N) => void) {
   for (const k in n) if (k !== 'loc' && k !== 'leadingComments' && k !== 'trailingComments' && k !== 'extra') walk(n[k], fn)
 }
 
-const isIntrinsic = (o: Opening) => o.name.type === 'JSXIdentifier' && /^[a-z]/.test(o.name.name ?? '')
+// <div>, and Motion's <motion.div> / <m.div>: they render that DOM element and pass data-* through to it
+const isIntrinsic = (o: Opening) => (o.name.type === 'JSXIdentifier' && /^[a-z]/.test(o.name.name ?? '')) ||
+  (o.name.type === 'JSXMemberExpression' && /^(motion|m)$/.test((o.name as unknown as { object: { name?: string } }).object.name ?? '') && /^[a-z]/.test(o.name.property?.name ?? ''))
 /** Where a new attribute goes: after the tag name and any `<Select<T>` type arguments. */
 const afterName = (o: Opening) => (o.typeArguments ?? o.typeParameters)?.end ?? o.name.end
 /** `="text"` when that's safe in JSX, else `={expression}`; `true` becomes a bare attribute. */
 const jsxValue = (v: unknown) => (v === true ? '' : typeof v === 'string' && !/["&\n]/.test(v) ? `="${v}"` : `={${JSON.stringify(v)}}`)
 const LITERAL = /^(String|Numeric|Boolean|Null)Literal$/
+// JS (not JSX) values, for inside objects: transition={{ type: "spring", ease: [0.2, 0, 0, 1], repeat: Infinity }}
+const keyText = (k: string) => (/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k))
+const INF = '__Infinity__' // JSON can't carry Infinity, so the overlay sends this instead
+const jsValue = (v: unknown): string =>
+  v === INF || v === Infinity ? 'Infinity'
+  : Array.isArray(v) ? `[${v.map(jsValue).join(', ')}]`
+  : v && typeof v === 'object' ? `{ ${Object.entries(v).map(([k, x]) => `${keyText(k)}: ${jsValue(x)}`).join(', ')} }`
+  : JSON.stringify(v)
+type Obj = N & { properties: (N & { key: N & { name?: string; value?: string }; value: N; computed?: boolean })[] }
+const isPlain = (v: N & { elements?: N[]; expressions?: N[]; operator?: string; argument?: N; name?: string }): boolean =>
+  LITERAL.test(v.type) || (v.type === 'Identifier' && v.name === 'Infinity') ||
+  (v.type === 'UnaryExpression' && v.operator === '-' && v.argument?.type === 'NumericLiteral') ||
+  (v.type === 'TemplateLiteral' && !v.expressions?.length) || (v.type === 'ArrayExpression' && !!v.elements?.every(e => e && isPlain(e)))
 const isLiteral = (v: N & { expression?: N & { expressions?: N[] } }) =>
   LITERAL.test(v.type) || (v.type === 'JSXExpressionContainer' && !!v.expression &&
     (LITERAL.test(v.expression.type) || (v.expression.type === 'TemplateLiteral' && !v.expression.expressions?.length)))
@@ -49,7 +65,19 @@ const isLiteral = (v: N & { expression?: N & { expressions?: N[] } }) =>
 export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 4) {
   const ast = parseJSX(code)
   const byLoc = new Map<string, El>()
-  walk(ast, n => { if (n.type === 'JSXElement') byLoc.set(`${n.loc.start.line}:${n.loc.start.column}`, n as El) })
+  // objects declared once in this file (const variants = { … }), so variants={variants} can be edited where it's defined
+  const consts = new Map<string, N | null>()
+  walk(ast, n => {
+    if (n.type === 'JSXElement') byLoc.set(`${n.loc.start.line}:${n.loc.start.column}`, n as El)
+    const d = n as N & { id?: N & { name?: string }; init?: N }
+    if (n.type === 'VariableDeclarator' && d.id?.type === 'Identifier' && d.init) consts.set(d.id.name!, consts.has(d.id.name!) ? null : d.init)
+  })
+  const asObject = (n: N | undefined | null): Obj | null => {
+    const x = n?.type === 'TSAsExpression' || n?.type === 'TSSatisfiesExpression' ? (n as N & { expression: N }).expression : n
+    if (x?.type === 'ObjectExpression') return x as Obj
+    if (x?.type === 'Identifier') return asObject(consts.get((x as N & { name: string }).name))
+    return null
+  }
   const ms = new MagicString(code)
   const results: EditResult[] = []
 
@@ -67,6 +95,38 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       if (!a) ms.appendLeft(afterName(op), ` ${name}${v}`)
       else if (a.end > a.name.end) { if (v) ms.overwrite(a.name.end, a.end, v); else ms.remove(a.name.end, a.end) }
       else if (v) ms.appendLeft(a.end, v)
+    }
+    /** Set `path` inside the object prop `name`, adding whatever keys are missing. Returns why it couldn't, or null. */
+    const setDeep = (name: string, path: string[], value: unknown): string | null => {
+      const nest = (keys: string[]): unknown => keys.reduceRight<unknown>((acc, k) => ({ [k]: acc }), value)
+      const a = attrOf(name)
+      if (!a) { if (value != null) ms.appendLeft(afterName(op), ` ${name}={${jsValue(nest(path))}}`); return null }
+      let obj = a.value?.type === 'JSXExpressionContainer' ? asObject(a.value.expression) : null
+      if (!obj) return `${name} isn’t an object written in this file; edit it by hand`
+      for (let i = 0; i < path.length; i++) {
+        const prop = obj.properties.find(p => p.type === 'ObjectProperty' && !p.computed && (p.key.name ?? p.key.value) === path[i])
+        const last = i === path.length - 1
+        if (!prop) {
+          if (value == null) return null // nothing to remove
+          const text = `${keyText(path[i])}: ${jsValue(nest(path.slice(i + 1)))}`
+          const tail = obj.properties.at(-1)
+          if (tail) ms.appendLeft(tail.end, `, ${text}`); else ms.overwrite(obj.start, obj.end, `{ ${text} }`)
+          return null
+        }
+        if (last) {
+          if (!isPlain(prop.value)) return `${path.join('.')} is set by an expression; edit it by hand`
+          if (value == null) { // take the comma with it: the one after, or for the last key the one before
+            const ps = obj.properties, i = ps.indexOf(prop)
+            if (ps[i + 1]) ms.remove(prop.start, ps[i + 1].start); else if (ps[i - 1]) ms.remove(ps[i - 1].end, prop.end); else ms.remove(prop.start, prop.end)
+          }
+          else ms.overwrite(prop.value.start, prop.value.end, jsValue(value))
+          return null
+        }
+        const next = asObject(prop.value)
+        if (!next) return `${path.slice(0, i + 1).join('.')} isn’t an object written in this file; edit it by hand`
+        obj = next
+      }
+      return null
     }
     const writeText = (t: string) => {
       const kids = el.children
@@ -103,7 +163,11 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
 
     if (e.props) for (const [name, value] of Object.entries(e.props)) {
       const skip = (reason: string) => r.skipped.push({ prop: name, value: String(value), reason })
-      if (name === 'children') {
+      if (name.includes('.')) {
+        const [head, ...rest] = name.split('.')
+        const err = setDeep(head, rest, value)
+        if (err) { skip(err); continue }
+      } else if (name === 'children') {
         if (typeof value !== 'string') { skip('only text children are written'); continue }
         const err = writeText(value)
         if (err) { skip(err); continue }

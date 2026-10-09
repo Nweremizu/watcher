@@ -177,7 +177,7 @@ function invert(e: Edit): Edit {
   if (e.prop === '#unnode') return { ...e, prop: '#node' }
   if (e.prop === '#text') return { ...e, before: el.innerHTML }
   if (e.prop[0] === '@') return { ...e, before: el.getAttribute(e.prop.slice(1)) ?? '\u0000' }
-  if (e.prop[0] === '%') return { ...e, before: encodeProp(currentProps(e.fiber!)[e.prop.slice(1)]) }
+  if (e.prop[0] === '%') return { ...e, before: encodeProp(getPath(currentProps(e.fiber!), e.prop.slice(1).split('.'))) }
   if (isStateKey(e.prop)) return { ...e, before: getStateRule(el, e.prop) }
   return { ...e, before: el.style.getPropertyValue(e.prop), imp: el.style.getPropertyPriority(e.prop) === 'important' }
 }
@@ -233,16 +233,40 @@ function renderer(doc: Document): Renderer | null {
   for (const r of h?.renderers?.values() ?? []) if (r.overrideProps) return r as Renderer
   return null
 }
-const encodeProp = (v: unknown) => (v === undefined ? '\u0000' : JSON.stringify(v))
+type Vals = Record<string, unknown>
+const isObj = (v: unknown): v is Vals => !!v && typeof v === 'object' && !Array.isArray(v)
+/** props.transition.duration for ['transition', 'duration'] */
+const getPath = (o: unknown, path: string[]) => path.reduce<unknown>((x, k) => (isObj(x) ? x[k] : undefined), o)
+/** A copy of `o` with `path` set (undefined deletes it), sharing everything else. */
+function setIn(o: unknown, path: string[], v: unknown): unknown {
+  if (!path.length) return v
+  const out: Vals = isObj(o) ? { ...o } : {}
+  const next = setIn(out[path[0]], path.slice(1), v)
+  if (next === undefined) delete out[path[0]]; else out[path[0]] = next
+  return out
+}
+const INF = '__Infinity__' // JSON has no Infinity (Motion's repeat: Infinity), so it travels as this
+const toJson = (v: unknown) => JSON.stringify(v, (_, x) => (x === Infinity ? INF : x))
+const fromJson = (s: string) => JSON.parse(s, (_, x) => (x === INF ? Infinity : x))
+const encodeProp = (v: unknown) => (v === undefined ? '\u0000' : toJson(v))
+// React's overrideProps copies from the last *committed* props, so two edits in one tick would drop the first.
+// Stage each top-level prop until React has rendered (its sync flush is a microtask queued before ours).
+const staged = new Map<Fiber, Vals>()
 function writeProp(el: HTMLElement, f: Fiber, name: string, enc: string) {
   const r = renderer(el.ownerDocument)
   if (!r) return
-  if (enc === '\u0000') r.overridePropsDeletePath(currentFiber(f), [name]); else r.overrideProps(currentFiber(f), [name], JSON.parse(enc))
+  const cur = currentFiber(f), [head, ...rest] = name.split('.')
+  let stage = staged.get(cur)
+  if (!stage) { staged.set(cur, (stage = {})); queueMicrotask(() => staged.delete(cur)) }
+  const value = enc === '\u0000' ? undefined : fromJson(enc)
+  const next = rest.length ? setIn(head in stage ? stage[head] : currentProps(f)[head], rest, value) : value
+  stage[head] = next
+  if (next === undefined) r.overridePropsDeletePath(cur, [head]); else r.overrideProps(cur, [head], next)
   setTimeout(bump) // React re-renders in a microtask; refresh the inspector after it
 }
 /** Edit a component prop live. It lasts until the parent re-renders with its own value (as in React DevTools), or you apply it to code. */
 function setProp(f: Fiber, host: HTMLElement, name: string, value: unknown) {
-  record(host, '%' + name, () => encodeProp(currentProps(f)[name]), false, f)
+  record(host, '%' + name, () => encodeProp(getPath(currentProps(f), name.split('.'))), false, f)
   writeProp(host, f, name, encodeProp(value))
 }
 
@@ -912,16 +936,16 @@ const Side = ({ s }: { s: keyof typeof SIDE }) => (
 
 // ── fields ──────────────────────────────────────────────────────────────────
 const NUM = /^-?\d*\.?\d+$/
-const fmt = (v: string | number) => {
-  if (typeof v === 'number') return String(round(v))
+const fmt = (v: string | number, digits = 1) => {
+  if (typeof v === 'number') return String(round(v, digits))
   const m = /^(-?[\d.]+)(px|deg)?$/.exec(v)
   return m ? String(round(+m[1], 2)) : v
 }
 
 /** Number field, value left, unit/axis suffix right. Takes any CSS value; ↑/↓ step (⇧ ×10); drag the suffix to scrub. */
-function Num({ suffix, value, onChange, unit = 'px', step = 1 }: { suffix?: ReactNode; value: string | number; onChange: (v: string) => void; unit?: string; step?: number }) {
+function Num({ suffix, value, onChange, unit = 'px', step = 1, digits = 1 }: { suffix?: ReactNode; value: string | number; onChange: (v: string) => void; unit?: string; step?: number; digits?: number }) {
   const [draft, setDraft] = useState<string | null>(null)
-  const shown = draft ?? fmt(value)
+  const shown = draft ?? fmt(value, digits)
   const apply = (raw: string) => { setDraft(raw); const v = raw.trim(); if (v) onChange(NUM.test(v) ? v + unit : v) }
   const scrub = (e: RPointerEvent) => {
     e.preventDefault()
@@ -1269,7 +1293,7 @@ function describe(v: unknown): string {
 function PropsSection({ el }: { el: HTMLElement }) {
   const f = componentFiber(el)
   if (!f) return null
-  const props = Object.entries(currentProps(f)).filter(([k]) => k !== 'data-wsrc-c')
+  const props = Object.entries(currentProps(f)).filter(([k]) => k !== 'data-wsrc-c' && k !== 'data-wsrc')
   if (!props.length) return null
   const host = hostOf(f) ?? el, live = !!renderer(el.ownerDocument)
   const set = (k: string) => (v: unknown) => setProp(f, host, k, v)
@@ -1357,7 +1381,7 @@ function ChecksPanel({ rev, select }: { rev: number; select: (el: HTMLElement) =
 }
 
 /** Bézier curve editor: drag the two handles, or pick a preset or one of the app's --ease-* tokens. */
-function EasingEditor({ value, duration, onChange }: { value: string; duration: number; onChange: (v: string) => void }) {
+function EasingEditor({ value, duration, onChange, chips: showChips = true }: { value: string; duration: number; onChange: (v: string) => void; chips?: boolean }) {
   const p = parseEase(value)
   const X = (t: number) => 16 + t * 168, Y = (v: number) => 126 - v * 102 // room above and below for overshoot
   const drag = (i: 0 | 1) => (e: RPointerEvent<SVGCircleElement>) => {
@@ -1389,7 +1413,7 @@ function EasingEditor({ value, duration, onChange }: { value: string; duration: 
           <circle cx={X(p[2])} cy={Y(p[3])} r={5} className="ezh" onPointerDown={drag(1)} />
         </svg>
       ) : <p className="stnote">{value} isn’t a curve that can be drawn. Pick one below to replace it.</p>}
-      <div className="ezchips">{chips.map(c => <button key={c.l + c.v} className={'ezchip' + (c.on ? ' on' : '')} onClick={() => onChange(c.v)}>{c.l}</button>)}</div>
+      {showChips && <div className="ezchips">{chips.map(c => <button key={c.l + c.v} className={'ezchip' + (c.on ? ' on' : '')} onClick={() => onChange(c.v)}>{c.l}</button>)}</div>}
       <div className="eztrack" data-tip="Preview"><i className="ezdot" style={{ '--ez': value, '--ezd': `${Math.min(2000, Math.max(200, duration))}ms` } as CSSProperties} /></div>
       <Field mono value={value} onChange={onChange} />
     </div>
@@ -1400,6 +1424,150 @@ function KeyframeList({ el, name }: { el: HTMLElement; name: string }) {
   if (!r) return null
   return <div className="kf">{[...r.cssRules].map((k, i) => <div key={i}><b>{(k as CSSKeyframeRule).keyText}</b><span>{(k as CSSKeyframeRule).style.cssText}</span></div>)}</div>
 }
+/** One state's values (opacity, x, scale…): numbers scrub, strings type, add or remove a key. */
+function MotionValues({ values, set }: { values: Vals; set: (k: string, v: unknown) => void }) {
+  const [k, setK] = useState(''), [v, setV] = useState('')
+  const add = () => { if (k.trim()) { set(k.trim(), v.trim() !== '' && !isNaN(+v) ? +v : v.trim()); setK(''); setV('') } }
+  return (
+    <>
+      {Object.entries(values).filter(([key]) => key !== 'transition' && key !== 'transitionEnd').map(([key, val]) => (
+        <div className="kv" key={key}>
+          <span className="k mono" title={key}>{key}</span>
+          {typeof val === 'number' ? <Num value={val} unit="" digits={2} step={Math.abs(val) <= 2 ? 0.05 : 1} onChange={x => { const n = parseFloat(x); if (!isNaN(n)) set(key, n) }} />
+            : typeof val === 'string' ? <Field mono value={val} onChange={x => set(key, x)} />
+            : <span className="pval mono" title={toJson(val)}>{toJson(val)}</span>}
+          <button className="b xs" data-tip="Remove" onClick={() => set(key, undefined)}><Icon d={P.x} size={12} /></button>
+        </div>
+      ))}
+      <div className="kv">
+        <div className="f"><input className="mono" placeholder="opacity" value={k} onChange={e => setK(e.target.value)} spellCheck={false} /></div>
+        <div className="f"><input className="mono" placeholder="1" value={v} onChange={e => setV(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} spellCheck={false} /></div>
+        <button className="b xs" data-tip="Add value" disabled={!k.trim()} onClick={add}><Icon d={P.plus} size={12} /></button>
+      </div>
+    </>
+  )
+}
+// Motion's named easings, as curves where they are one (anticipate overshoots backwards and isn't a bezier)
+const MOTION_EASES: Record<string, Bez | null> = {
+  easeOut: [0, 0, 0.58, 1], easeInOut: [0.42, 0, 0.58, 1], easeIn: [0.42, 0, 1, 1], linear: [0, 0, 1, 1],
+  circOut: [0, 0.55, 0.45, 1], backOut: [0.33, 1.53, 0.69, 0.99], anticipate: null,
+}
+const easeCss = (e: unknown) => (Array.isArray(e) && e.length === 4 ? bezText(e as number[]) : typeof e === 'string' && MOTION_EASES[e] ? bezText(MOTION_EASES[e]!) : String(e ?? 'easeOut'))
+function SpringPreview({ t }: { t: Vals }) {
+  const { pts, settle, approx } = springCurve(t)
+  const maxT = pts.at(-1)?.[0] || 1, hi = Math.max(1.1, ...pts.map(p => p[1])), lo = Math.min(0, ...pts.map(p => p[1]))
+  const X = (s: number) => 8 + (s / maxT) * 184, Y = (x: number) => 72 - ((x - lo) / (hi - lo)) * 60
+  return (
+    <div className="spring">
+      <svg viewBox="0 0 200 80" className="ezsvg">
+        <line x1={8} x2={192} y1={Y(1)} y2={Y(1)} className="ezref" />
+        <polyline points={pts.map(([s, x]) => `${X(s).toFixed(1)},${Y(x).toFixed(1)}`).join(' ')} className="ezcurve" />
+      </svg>
+      <span>{approx ? '≈ ' : ''}settles in {fmtMs(settle * 1000)}</span>
+    </div>
+  )
+}
+/** Motion's transition object: default, tween (duration + ease) or spring (duration + bounce, or physics). */
+function MotionTransition({ t, set, stagger }: { t: Vals | undefined; set: (k: string, v: unknown) => void; stagger: boolean }) {
+  const has = (k: string) => t?.[k] !== undefined
+  const num = (k: string, d: number) => (typeof t?.[k] === 'number' ? (t[k] as number) : d)
+  const physics = ['stiffness', 'damping', 'mass'].some(has)
+  const type = t?.type === false ? 'instant' : typeof t?.type === 'string' ? t.type : physics || has('bounce') || has('visualDuration') ? 'spring' : has('duration') || has('ease') ? 'tween' : 'default'
+  const setType = (v: 'default' | 'tween' | 'spring') => {
+    if (v === 'default') { set('type', undefined); return }
+    set('type', v)
+    // a fresh spring starts critically damped (bounce 0): it settles without wobbling, which suits UI
+    if (v === 'spring' && !physics && !has('visualDuration') && !has('duration')) { set('visualDuration', 0.3); set('bounce', 0) }
+    if (v === 'spring' && has('ease')) set('ease', undefined)
+    if (v === 'tween') {
+      for (const k of ['bounce', 'visualDuration', 'stiffness', 'damping', 'mass']) if (has(k)) set(k, undefined) // spring-only keys
+      if (!has('duration')) set('duration', 0.3)
+      if (!has('ease')) set('ease', 'easeOut')
+    }
+  }
+  const secs = (k: string) => (x: string) => { const n = parseFloat(x); if (!isNaN(n)) set(k, n) }
+  const durKey = has('visualDuration') || !has('duration') ? 'visualDuration' : 'duration'
+  return (
+    <>
+      <Seg value={type === 'instant' || type === 'keyframes' || type === 'inertia' ? 'default' : (type as 'default' | 'tween' | 'spring')} options={[['default', 'Default'], ['tween', 'Tween'], ['spring', 'Spring']] as const} onChange={setType} />
+      {type === 'default' && <p className="stnote">Motion picks per value: a spring for x, y, scale and rotate, a 0.3s ease for opacity and colours.</p>}
+      {type === 'instant' && <p className="stnote">type: false, so values jump without animating.</p>}
+      {type === 'tween' && <>
+        <Row label="Duration"><Num suffix="s" value={num('duration', 0.3)} unit="" digits={2} step={0.05} onChange={secs('duration')} /></Row>
+        <div className="ezchips mease">{Object.keys(MOTION_EASES).map(e => <button key={e} className={'ezchip' + (t?.ease === e ? ' on' : '')} onClick={() => set('ease', e)}>{e}</button>)}</div>
+        <EasingEditor value={easeCss(t?.ease)} duration={num('duration', 0.3) * 1000} chips={false} onChange={css => { const b = parseEase(css); set('ease', b ? b.map(n => round(n, 2)) : css) }} />
+      </>}
+      {type === 'spring' && <>
+        {physics ? <>
+          <Row label="Stiffness"><Num value={num('stiffness', 100)} unit="" step={10} onChange={secs('stiffness')} /></Row>
+          <Row label="Damping"><Num value={num('damping', 10)} unit="" step={1} onChange={secs('damping')} /></Row>
+          <Row label="Mass"><Num value={num('mass', 1)} unit="" digits={2} step={0.1} onChange={secs('mass')} /></Row>
+          <button className="linkb" onClick={() => { set('stiffness', undefined); set('damping', undefined); set('mass', undefined); set('visualDuration', 0.3); set('bounce', 0) }}>Use duration and bounce</button>
+        </> : <>
+          <Row label="Duration"><Num suffix="s" value={num(durKey, durKey === 'duration' ? 0.8 : 0.3)} unit="" digits={2} step={0.05} onChange={secs(durKey)} /></Row>
+          <Row label="Bounce"><Num value={num('bounce', has(durKey) ? 0.3 : 0)} unit="" digits={2} step={0.05} onChange={x => { const n = parseFloat(x); if (!isNaN(n)) set('bounce', Math.min(1, Math.max(-1, n))) }} /></Row>
+          <button className="linkb" onClick={() => { set('visualDuration', undefined); set('duration', undefined); set('bounce', undefined); set('stiffness', 300); set('damping', 30); set('mass', 1) }}>Use stiffness and damping</button>
+        </>}
+        <SpringPreview t={t ?? {}} />
+      </>}
+      <Row label="Delay"><Num suffix="s" value={num('delay', 0)} unit="" digits={2} step={0.05} onChange={secs('delay')} /></Row>
+      <Row label="Repeat"><Field mono value={has('repeat') ? String(t!.repeat) : ''} placeholder="0, 2 or Infinity" onChange={x => set('repeat', x.trim() === '' ? undefined : /^inf/i.test(x.trim()) ? Infinity : parseFloat(x) || 0)} /></Row>
+      {has('repeat') && <Row label="Repeat type"><Pick value={String(t!.repeatType ?? 'loop')} options={['loop', 'reverse', 'mirror']} onChange={x => set('repeatType', x)} /></Row>}
+      {stagger && <>
+        <Row label="Stagger"><Num suffix="s" value={num('staggerChildren', 0)} unit="" digits={2} step={0.01} onChange={secs('staggerChildren')} /></Row>
+        <Row label="Children delay"><Num suffix="s" value={num('delayChildren', 0)} unit="" digits={2} step={0.05} onChange={secs('delayChildren')} /></Row>
+      </>}
+    </>
+  )
+}
+function MotionSection({ el, f }: { el: HTMLElement; f: Fiber }) {
+  const p = currentProps(f) as Vals, live = !!renderer(el.ownerDocument)
+  const at = (path: string) => (k: string, v: unknown) => setProp(f, el, `${path}.${k}`, v)
+  const states = MOTION_STATES.map(([key, name]) => ({ key, name, s: stateOf(p, key) })).filter(x => p[x.key] !== undefined)
+  const shown = new Set(states.map(x => x.s?.label).filter(Boolean))
+  const anim = stateOf(p, 'animate')
+  // the transition behind the enter animation: one on the target itself, else the component's transition prop,
+  // else (a child driven by a parent's labels) the one inside the variant it animates to
+  const inVariant = !anim && !isObj(p.transition) && isObj(p.variants)
+    ? Object.entries(p.variants).filter(([, v]) => isObj(v) && isObj(v.transition)).sort(([a], [b]) => +/^(visible|show|animate|enter|in|open)$/.test(b) - +/^(visible|show|animate|enter|in|open)$/.test(a))[0]?.[0]
+    : undefined
+  const tPath = anim && isObj(anim.values.transition) ? `${anim.path}.transition` : inVariant ? `variants.${inVariant}.transition` : 'transition'
+  const t = getPath(p, tPath.split('.'))
+  const variants = isObj(p.variants) ? Object.entries(p.variants).filter(([l, v]) => isObj(v) && !shown.has(l)) : []
+  const gestures = (['whileHover', 'whileTap', 'whileFocus'] as const).filter(g => p[g] !== undefined)
+  const canEnter = p.initial !== undefined && p.initial !== false && (p.animate !== undefined || p.whileInView !== undefined)
+  return (
+    <>
+      <Section title={`<${typeName(f.type)}>`}>
+        {!live && <p className="empty">Add the <code>watcher-ui/vite</code> plugin to edit Motion props live.</p>}
+        {(canEnter || gestures.length > 0) && <>
+          <Lbl>Play</Lbl>
+          <div className="playrow">
+            {canEnter && <button className="b sm" onClick={() => replayEnter(el, f)}><Icon d={P.replay} size={11} />Enter</button>}
+            {gestures.map(g => <button key={g} className="b sm" onClick={() => playGesture(el, g)}><Icon d={P.play} size={11} />{g === 'whileHover' ? 'Hover' : g === 'whileTap' ? 'Press' : 'Focus'}</button>)}
+          </div>
+        </>}
+        {states.map(({ key, name, s }) => (
+          <div key={key} className="mstate">
+            <Lbl>{name}{s?.label && <span className="mlabel"> · variant “{s.label}”</span>}</Lbl>
+            {s ? <MotionValues values={s.values} set={at(s.path)} /> : <p className="empty mono">{toJson(p[key])}</p>}
+          </div>
+        ))}
+        {!states.length && <p className="empty">No states on this element. Its values come from a parent’s variants.</p>}
+      </Section>
+      <Section title="Motion transition">
+        {tPath !== 'transition' && <p className="stnote">Editing the transition inside <code>{tPath.replace(/\.transition$/, '')}</code>.</p>}
+        <MotionTransition t={isObj(t) ? t : undefined} set={at(tPath)} stagger={typeof p.animate === 'string'} />
+      </Section>
+      {variants.length > 0 && (
+        <Section title="Variants" n={variants.length}>
+          {variants.map(([label, v]) => <div key={label} className="mstate"><Lbl>{label}</Lbl><MotionValues values={v as Vals} set={at(`variants.${label}`)} /></div>)}
+        </Section>
+      )}
+    </>
+  )
+}
+
 function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement | null) => void }) {
   const cs = getComputedStyle(el)
   const set = (p: string) => (v: string) => editStyle(el, p, v)
@@ -1409,11 +1577,13 @@ function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement 
   // one value per running animation; CSS repeats shorter lists, so expand before editing one entry
   const setAt = (p: string, i: number) => (v: string) => editStyle(el, p, names.map((_, j) => (j === i ? v : at(cs.getPropertyValue(p), j))).join(', '))
   const issues = motionIssues(el)
+  const mf = motionFiber(el)
   return (
     <>
       <Crumbs el={el} select={select} />
       {issues.length > 0 && <Section title="Motion checks" n={issues.length}>{issues.map((it, i) => <IssueRow key={i} it={it} />)}</Section>}
-      <Section title="Transition">
+      {mf && <MotionSection el={el} f={mf} />}
+      {(!mf || moves) && <Section title={mf ? 'CSS transition' : 'Transition'}>
         {!moves && <p className="empty">No transition yet. Give it a duration and state changes (hover, focus, press) animate.</p>}
         <Row label="Property"><Field mono value={cs.transitionProperty} onChange={set('transition-property')} placeholder="opacity, scale" /></Row>
         <Row label="Duration"><Num suffix="ms" value={durs[0] ?? 0} unit="ms" step={10} onChange={set('transition-duration')} /></Row>
@@ -1423,7 +1593,7 @@ function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement 
         <EasingEditor value={at(cs.transitionTimingFunction, 0) || 'ease'} duration={durs[0] || 300} onChange={set('transition-timing-function')} />
         <Lbl>Play</Lbl>
         <div className="playrow">{STATES.map(st => <button key={st} className="b sm" disabled={!moves} onClick={() => playState(el, st)}><Icon d={P.play} size={11} />{st[0].toUpperCase() + st.slice(1)}</button>)}</div>
-      </Section>
+      </Section>}
       {names.map((n, i) => (
         <Section key={n + i} title={`@keyframes ${n}`}>
           <Row label="Duration"><Num suffix="ms" value={toMs(at(cs.animationDuration, i))} unit="ms" step={10} onChange={setAt('animation-duration', i)} /></Row>
@@ -1438,7 +1608,7 @@ function AnimateTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement 
           <button className="wide" onClick={() => replayKeyframes(el)}><Icon d={P.replay} />Replay</button>
         </Section>
       ))}
-      <p className="stnote">Press <kbd>M</kbd> for the timeline: it catches animations as they run, and replays them at 25% or 10% speed.</p>
+      <p className="stnote">Press <kbd>M</kbd> for the timeline: it catches animations as they run, and replays them at 25% or 10% speed.{mf && ' Motion runs some values (springs on x, y, scale) in JavaScript; those don’t show there, so replay them here.'}</p>
     </>
   )
 }
@@ -1963,12 +2133,110 @@ function motionIssues(el: HTMLElement): Issue[] {
   }
   const max = Math.max(0, ...durs)
   if (max > 400) add('motion-slow', `A ${fmtMs(max)} transition feels sluggish for hover and press feedback. 150–300ms reads as responsive.`, { label: '200ms', run: () => editStyle(el, 'transition-duration', '200ms') })
+  // Motion sets these every frame; a CSS transition on the same property restarts each frame and lags behind (mushy springs)
+  const mf = motionFiber(el)
+  if (mf && moves) {
+    const fought = motionCssProps(currentProps(mf) as Vals), listed = splitList(cs.transitionProperty)
+    const clash = listed.includes('all') ? [...fought] : listed.filter(x => fought.has(x))
+    if (clash.length) {
+      const keep = listed.filter(x => x !== 'all' && !fought.has(x) && !x.startsWith('--'))
+      add('motion-fight', `Motion animates ${clash.join(', ')}, and a CSS transition does too, so every frame Motion sets restarts it and the animation lags. Leave those to Motion.`,
+        keep.length ? { label: 'Drop from CSS', run: () => editStyle(el, 'transition-property', keep.join(', ')) } : undefined)
+    }
+  }
   if (cs.willChange !== 'auto' && splitList(cs.willChange).some(p => !/^(transform|translate|scale|rotate|opacity|filter|scroll-position|contents)$/.test(p)))
     add('motion-will-change', `will-change: ${cs.willChange} reserves memory for properties the GPU can’t composite. Keep it to transform, opacity or filter, and only where the first frame stutters.`)
   return out
 }
 
-type Rec = { a: Animation; el: HTMLElement; kind: 'transition' | 'keyframes' | 'script'; name: string; t0: number }
+// ── Motion (motion.dev): read and edit motion.* props, replay them, preview springs ──
+/** The motion.* component rendering `el` (its render function is named "motion.div" and so on). */
+function motionFiber(el: Element): Fiber | null {
+  for (let f = fiberOf(el)?.return ?? null; f; f = f.return) {
+    if (typeof f.type === 'string') return null // another DOM element in between: not this component's own node
+    if (typeName(f.type)?.startsWith('motion.')) return f
+  }
+  return null
+}
+const MOTION_STATES = [['initial', 'Initial'], ['animate', 'Animate'], ['whileHover', 'Hover'], ['whileTap', 'Press'], ['whileFocus', 'Focus'], ['whileInView', 'In view'], ['exit', 'Exit']] as const
+/** A state's values: written inline, or a variant label looked up in `variants`. */
+function stateOf(p: Vals, key: string): { path: string; values: Vals; label?: string } | null {
+  const v = p[key]
+  if (isObj(v)) return { path: key, values: v }
+  const label = typeof v === 'string' ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : undefined
+  return label && isObj(p.variants) && isObj(p.variants[label]) ? { path: `variants.${label}`, values: p.variants[label] as Vals, label } : null
+}
+let synthetic = false // our own pointer events for Motion's gestures; the overlay's listeners ignore them
+function fire(el: Element, type: string) {
+  synthetic = true
+  try { el.dispatchEvent(new PointerEvent(type, { bubbles: !/enter|leave/.test(type), cancelable: true, composed: true, pointerType: 'mouse', isPrimary: true, button: 0 })) }
+  finally { synthetic = false }
+}
+/** Trigger whileHover / whileTap / whileFocus the way a person would, hold, then let go. */
+function playGesture(el: HTMLElement, g: 'whileHover' | 'whileTap' | 'whileFocus') {
+  const hold = 900
+  if (g === 'whileHover') { fire(el, 'pointerenter'); setTimeout(() => fire(el, 'pointerleave'), hold) }
+  else if (g === 'whileTap') { fire(el, 'pointerdown'); setTimeout(() => fire(el, 'pointerup'), hold) }
+  else { el.focus({ focusVisible: true } as FocusOptions); setTimeout(() => el.blur(), hold) }
+}
+/** Play the enter animation again: jump to `initial` instantly, then hand `animate` back so it runs with its real transition. */
+function replayEnter(el: HTMLElement, f: Fiber) {
+  const r = renderer(el.ownerDocument), p = currentProps(f) as Vals
+  if (!r) return
+  const set = (v: unknown) => (v === undefined ? r.overridePropsDeletePath(currentFiber(f), ['animate']) : r.overrideProps(currentFiber(f), ['animate'], v))
+  if (typeof p.animate === 'string' && typeof p.initial === 'string') {
+    // variant labels: children follow the label, so flip it (their own transitions run both ways)
+    set(p.initial); setTimeout(() => set(p.animate), 450); return
+  }
+  const from = stateOf(p, 'initial'), to = p.animate ?? stateOf(p, 'whileInView')?.values
+  if (!from || to === undefined) { notify('Nothing to replay: there’s no initial state to start from.'); return }
+  set({ ...from.values, transition: { type: false } }) // type: false is Motion's "no animation"
+  setTimeout(() => set(to), 60)
+  if (p.animate === undefined) setTimeout(() => set(undefined), 2500) // whileInView took over; give it back
+}
+const TRANSFORM_KEYS = /^(x|y|z|scale[XYZ]?|rotate[XYZ]?|skew[XY]?|translate[XYZ]|perspective)$/
+/** CSS properties a motion component animates, across all its states and variants. */
+function motionCssProps(p: Vals) {
+  const out = new Set<string>()
+  const scan = (v: unknown) => {
+    if (!isObj(v)) return
+    for (const k of Object.keys(v)) {
+      if (k === 'transition' || k === 'transitionEnd') continue
+      if (TRANSFORM_KEYS.test(k)) ['transform', 'translate', 'scale', 'rotate'].forEach(x => out.add(x))
+      else out.add(k.replace(/[A-Z]/g, c => '-' + c.toLowerCase()))
+    }
+  }
+  for (const [k] of MOTION_STATES) scan(p[k])
+  if (isObj(p.variants)) Object.values(p.variants).forEach(scan)
+  return out
+}
+const springDefaults = { stiffness: 100, damping: 10, mass: 1, bounce: 0.3 } // motion-dom's defaults
+/** Spring physics for a transition, the way Motion resolves duration/bounce (duration alone is approximate). */
+function springOf(t: Vals) {
+  const n = (k: string) => (typeof t[k] === 'number' ? (t[k] as number) : undefined)
+  if (['stiffness', 'damping', 'mass'].some(k => n(k) !== undefined) || (n('visualDuration') === undefined && n('duration') === undefined && n('bounce') === undefined))
+    return { k: n('stiffness') ?? springDefaults.stiffness, c: n('damping') ?? springDefaults.damping, m: n('mass') ?? springDefaults.mass, approx: false }
+  const bounce = n('bounce') ?? springDefaults.bounce
+  const ratio = bounce < 0 ? 1 / Math.max(1 + bounce, 0.05) : Math.max(1 - bounce, 0.05)
+  const vd = n('visualDuration') ?? (n('duration') ?? 0.8) / 2.4 // duration is time-to-settle; Motion solves for it, this estimates it
+  const k = ((2 * Math.PI) / (vd * 1.2)) ** 2
+  return { k, c: 2 * ratio * Math.sqrt(k), m: 1, approx: n('visualDuration') === undefined || bounce < 0 }
+}
+/** Simulate the spring from 0 to 1: points for a curve, and when it settles. */
+function springCurve(t: Vals) {
+  const { k, c, m, approx } = springOf(t)
+  const pts: [number, number][] = []
+  let x = 0, v = 0, settle = 0
+  for (let i = 0, dt = 1 / 240; i < 240 * 4; i++) {
+    const a = (-k * (x - 1) - c * v) / m
+    v += a * dt; x += v * dt
+    if (Math.abs(x - 1) > 0.005 || Math.abs(v) > 0.05) settle = (i + 1) * dt
+    if (i % 4 === 0) pts.push([(i + 1) * dt, x])
+  }
+  return { pts: pts.filter(([s]) => s <= Math.max(0.3, settle * 1.15)), settle, approx }
+}
+
+type Rec = { a: Animation; el: HTMLElement; kind: 'transition' | 'keyframes' | 'motion' | 'script'; name: string; t0: number }
 const rec = { list: [] as Rec[], seen: new WeakSet<Animation>(), rate: 1 }
 /** Pick up animations that just started. Events catch CSS ones; polling (while the timeline is open) catches el.animate(). */
 function capture() {
@@ -1977,8 +2245,10 @@ function capture() {
     rec.seen.add(a)
     const el = (a.effect as KeyframeEffect | null)?.target as HTMLElement | null
     if (!el || el.getRootNode() !== document) continue // Watcher's own UI lives in a shadow root
-    const kind = 'transitionProperty' in a ? 'transition' : 'animationName' in a ? 'keyframes' : 'script'
-    const name = (a as CSSTransition).transitionProperty ?? (a as CSSAnimation).animationName ?? (a.id || 'animate()')
+    const kind = 'transitionProperty' in a ? 'transition' : 'animationName' in a ? 'keyframes' : motionFiber(el) ? 'motion' : 'script'
+    // a script animation is named by what it moves: "opacity, transform"
+    const moved = () => Object.keys((a.effect as KeyframeEffect).getKeyframes()[0] ?? {}).filter(k => !/^(offset|computedOffset|easing|composite)$/.test(k)).join(', ')
+    const name = (a as CSSTransition).transitionProperty ?? (a as CSSAnimation).animationName ?? (a.id || moved() || 'animate()')
     if (rec.rate !== 1) a.updatePlaybackRate(rec.rate)
     rec.list.push({ a, el, kind, name, t0: performance.now() })
     if (rec.list.length > 120) rec.list.shift()
@@ -2459,13 +2729,13 @@ function pendingEdits() {
       else if (p[0] === '@') attrs[p.slice(1)] = el.getAttribute(p.slice(1))
       else if (p[0] === '%') {
         const f = hist.filter(h => h.el === el && h.prop === p).at(-1)?.fiber
-        if (f) { if (!comp.has(f)) comp.set(f, {}); comp.get(f)![p.slice(1)] = currentProps(f)[p.slice(1)] ?? null }
+        if (f) { if (!comp.has(f)) comp.set(f, {}); comp.get(f)![p.slice(1)] = getPath(currentProps(f), p.slice(1).split('.')) ?? null }
       } else if (isStateKey(p)) { const i = p.indexOf(':'), v = getStateRule(el, p), css = p.slice(i + 1); if (v) (inState[p.slice(0, i)] ??= {})[css] = tokenRef(css, v) ?? hex(v) }
       else if (p[0] !== '#') { const v = el.style.getPropertyValue(p); if (v) styles[p] = tokenRef(p, v) ?? hex(v) }
     }
     // props are written where the component is used, not inside it
     for (const [f, vals] of comp) {
-      const at = parseSrc(String(currentProps(f)['data-wsrc-c'] ?? ''))
+      const at = parseSrc(String(currentProps(f)['data-wsrc-c'] ?? currentProps(f)['data-wsrc'] ?? '')) // motion.div carries data-wsrc
       if (at) put(el, at, '', { props: vals, comp: typeName(f.type) ?? undefined }, 1); else orphans.push(el)
     }
     const own = Object.keys(styles).length || Object.keys(attrs).length || text !== undefined
@@ -2485,7 +2755,7 @@ function pendingEdits() {
 async function postApply(items: Pending[], dryRun: boolean): Promise<ApplyResponse> {
   const r = await fetch('/__watcher/apply', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' },
-    body: JSON.stringify({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant, props }) => ({ file, loc, styles, text, attrs, variant, props })) }),
+    body: toJson({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant, props }) => ({ file, loc, styles, text, attrs, variant, props })) }),
   })
   return r.json()
 }
@@ -3296,8 +3566,9 @@ function Overlay() {
       ['keydown', key as EventListener], ['keyup', keyup as EventListener], ['wheel', wheel as EventListener, { capture: true, passive: false }],
       ['paste', paste as EventListener], ['blur', blur],
     ]
-    for (const [t, f, o] of on) window.addEventListener(t, f, o ?? true)
-    return () => { for (const [t, f, o] of on) window.removeEventListener(t, f, o ?? true) }
+    const guarded = on.map(([t, f, o]) => [t, (e: Event) => { if (!synthetic) f(e) }, o] as const) // Motion gesture replays aren't clicks
+    for (const [t, f, o] of guarded) window.addEventListener(t, f, o ?? true)
+    return () => { for (const [t, f, o] of guarded) window.removeEventListener(t, f, o ?? true) }
   }, [L, select])
 
   const toggleCanvas = () => {
@@ -3916,6 +4187,13 @@ const CSS_TEXT = `
 .playrow .b { box-shadow: inset 0 0 0 1px var(--border); font-size: 11.5px; gap: 5px; transition: scale .12s cubic-bezier(0.2, 0, 0, 1), background-color .12s; }
 .playrow .b:active:not(:disabled) { scale: 0.96; }
 .playrow .b:disabled { opacity: .45; cursor: default; }
+.mstate + .mstate { margin-top: 6px; }
+.mlabel { font-weight: 400; color: var(--text-x); text-transform: none; letter-spacing: 0; }
+.mease { margin: 2px 0 6px; }
+.spring { display: grid; gap: 4px; margin: 6px 0 8px; }
+.spring span { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.linkb { all: unset; display: block; margin: 2px 0 6px; font-size: 11px; color: var(--primary); cursor: pointer; }
+.linkb:hover { text-decoration: underline; }
 .kf { display: grid; gap: 3px; margin: 2px 0 8px; font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); }
 .kf div { display: flex; gap: 8px; min-width: 0; }
 .kf b { flex: none; min-width: 36px; color: var(--text); font-weight: 500; }
@@ -3942,6 +4220,7 @@ const CSS_TEXT = `
 .tlbar { position: absolute; top: 0; height: 10px; border-radius: 3px; background: var(--primary); }
 .tlbar.keyframes { background: oklch(62% .19 300); }
 .tlbar.script { background: oklch(64% .13 190); }
+.tlbar.motion { background: oklch(66% .17 350); }
 .tlbar.inf { mask-image: linear-gradient(90deg, #000 75%, transparent); }
 .tlhead { position: absolute; top: -3px; width: 2px; height: 16px; margin-left: -1px; border-radius: 1px; background: var(--text); }
 .tld { font-size: 10.5px; color: var(--text-x); text-align: right; }

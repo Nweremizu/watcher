@@ -2814,7 +2814,8 @@ const CSS_TEXT = `
 .stage .hov.off { opacity: 0; }
 .htip { transition: left .32s var(--goo), top .32s var(--goo); }
 @media (prefers-reduced-motion: reduce) { .stage .hov, .htip { transition: none; } }
-.stage .hov { fill: none; stroke: var(--primary); stroke-width: 1.25; stroke-dasharray: 4 3; }
+.stage .hov { fill: color-mix(in oklch, var(--primary) 9%, transparent); stroke: var(--primary); stroke-width: 1.25; stroke-dasharray: 4 3; }
+.stage .hov.dash { fill: none; } /* the Alt-measure target stays an outline */
 .stage .selr { fill: none; stroke: var(--primary); stroke-width: 1.5; }
 .stage .mg { fill: oklch(82% .14 85 / .22); }
 .stage .pd { fill: oklch(75% .14 150 / .2); }

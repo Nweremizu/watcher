@@ -57,7 +57,7 @@ const vp = { z: 1, x: 0, y: 0 }
 const hist: Edit[] = parentHost?.hist ?? []
 const changes: Map<HTMLElement, Set<string>> = parentHost?.changes ?? new Map()
 const strokes: number[][] = []
-const prefs = { spacing: true, snap: true, alwaysMeasure: false, flashUpdates: false, flashShifts: true }
+const prefs = { spacing: true, snap: true, alwaysMeasure: false, flashUpdates: false, flashShifts: true, persist: true }
 try { Object.assign(prefs, JSON.parse(localStorage.getItem('watcher:prefs') ?? '{}')) } catch { /* storage blocked */ }
 const savePrefs = () => { try { localStorage.setItem('watcher:prefs', JSON.stringify(prefs)) } catch { /* storage blocked */ } bump() }
 // pen: the path being drawn; pe: the path whose anchors are being edited
@@ -190,6 +190,91 @@ function resetEdits(el?: HTMLElement) {
   if (el) changes.delete(el); else changes.clear()
   redos.length = 0
   bump()
+}
+/** Live edits: (element, prop) pairs that still have an undo entry, i.e. that haven't been undone or written to code. */
+function liveEdits() {
+  const m = new Map<HTMLElement, Set<string>>()
+  for (const h of hist) if (h.prop !== '#node' && h.el.isConnected) { if (!m.has(h.el)) m.set(h.el, new Set()); m.get(h.el)!.add(h.prop) }
+  return m
+}
+
+// ── sessions: unapplied work survives reloads (per page, in this browser) ──
+const SESSION_KEY = 'watcher:session'
+type ElLoc = { src?: string; n?: number; path: number[] }
+type SavedEdit = { at: ElLoc; prop: string; value: string | null; canvas?: boolean }
+type SavedNode = { parent: ElLoc; index: number; html: string; canvas?: boolean }
+type SavedPage = { at: number; edits: SavedEdit[]; nodes: SavedNode[]; guides: Guide[]; canvas: boolean }
+const pageKey = () => location.pathname + location.search
+const restoredPages = new Set<string>() // a page is restored once per load; saving waits until then
+function readSession(): Record<string, SavedPage> { try { return JSON.parse(localStorage.getItem(SESSION_KEY) ?? '{}') } catch { return {} } }
+function writePage(page: SavedPage | null) {
+  const all = readSession(), key = pageKey()
+  if (page && (page.edits.length || page.nodes.length || page.guides.length || page.canvas)) all[key] = page; else delete all[key]
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(all)) } catch { /* storage full or blocked */ }
+}
+const bySrc = (src: string) => [...document.querySelectorAll('[data-wsrc]')].filter(e => e.getAttribute('data-wsrc') === src)
+/** How to find an element again after a reload: its stamped source line (and which copy), plus its child path. */
+function locate(el: Element): ElLoc {
+  const path: number[] = []
+  for (let e = el; e.parentElement && e !== document.body; e = e.parentElement) path.unshift([...e.parentElement.children].indexOf(e))
+  const src = el.getAttribute('data-wsrc')
+  return src ? { src, n: bySrc(src).indexOf(el), path } : { path }
+}
+function findLoc(at: ElLoc): HTMLElement | null {
+  if (at.src) { const list = bySrc(at.src); if (list.length) return (list[at.n ?? 0] ?? list[0]) as HTMLElement }
+  let e: Element | undefined = document.body
+  for (const i of at.path) { e = e?.children[i]; if (!e) return null } // source moved (or no plugin): fall back to the path
+  return e as HTMLElement
+}
+function capturePage(guides: Guide[]): SavedPage {
+  const lastIndex = (el: HTMLElement, prop: string) => { for (let i = hist.length - 1; i >= 0; i--) if (hist[i].el === el && hist[i].prop === prop) return i; return -1 }
+  const inCanvas = (i: number) => cv.on && i >= cv.mark
+  // added nodes are saved whole (their own styles included); skip ones nested in another added node
+  const added = hist.filter(h => h.prop === '#node' && h.el.isConnected && h.el.ownerDocument === document && h.el.parentElement)
+  const addedEls = new Set(added.map(h => h.el))
+  const insideAdded = (el: Element) => { for (let e = el.parentElement; e; e = e.parentElement) if (addedEls.has(e as HTMLElement)) return true; return false }
+  const nodes: SavedNode[] = added.filter(h => !insideAdded(h.el)).map(h => ({
+    parent: locate(h.el.parentElement!), index: [...h.el.parentElement!.children].indexOf(h.el), html: h.el.outerHTML, canvas: inCanvas(hist.indexOf(h)),
+  }))
+  const edits: SavedEdit[] = []
+  for (const [el, props] of liveEdits()) {
+    if (el.ownerDocument !== document || addedEls.has(el) || insideAdded(el)) continue
+    const at = locate(el)
+    for (const prop of props) {
+      const value = prop === '#text' ? el.innerHTML : prop[0] === '@' ? el.getAttribute(prop.slice(1)) : el.style.getPropertyValue(prop)
+      if (prop[0] !== '#' && prop[0] !== '@' && !value) continue
+      edits.push({ at, prop, value, canvas: inCanvas(lastIndex(el, prop)) })
+    }
+  }
+  return { at: Date.now(), edits, nodes, guides, canvas: cv.on }
+}
+/** Re-apply a saved page through the normal edit paths, so everything is undoable and shows up in Apply to code. */
+function restorePage(page: SavedPage) {
+  let applied = 0, missed = 0
+  const phase = (canvas: boolean) => {
+    for (const n of page.nodes.filter(x => !!x.canvas === canvas)) {
+      const parent = findLoc(n.parent), tpl = document.createElement('template')
+      tpl.innerHTML = n.html
+      const el = tpl.content.firstElementChild as HTMLElement | null
+      if (!parent || !el) { missed++; continue }
+      parent.insertBefore(el, parent.children[n.index] ?? null)
+      pushHist({ el, prop: '#node', before: '', t: 0 })
+      applied++
+    }
+    for (const e of page.edits.filter(x => !!x.canvas === canvas)) {
+      const el = findLoc(e.at)
+      if (!el) { missed++; continue }
+      if (e.prop === '#text') { const before = el.innerHTML; el.innerHTML = e.value ?? ''; pushHist({ el, prop: '#text', before, t: 0 }); track(el, '#text') }
+      else if (e.prop[0] === '@') setAttr(el, e.prop.slice(1), e.value ?? '')
+      else setStyle(el, e.prop, e.value ?? '')
+      applied++
+    }
+  }
+  phase(false) // page edits first, so canvas mode freezes the edited layout
+  if (page.canvas && !cv.on) enterCanvas()
+  phase(true)
+  for (const h of hist) h.t = 0 // don't let the next real edit coalesce into a restored one
+  return { applied, missed }
 }
 
 // ── canvas mode: freeze the live layout into absolutely positioned layers ──
@@ -1182,7 +1267,7 @@ function GuidePanel({ g, update, remove }: { g: Guide; update: (p: Partial<Guide
   )
 }
 
-const PREF_LABELS: [keyof typeof prefs, string][] = [['spacing', 'Show padding & margin'], ['snap', 'Smart snapping'], ['alwaysMeasure', 'Measure without holding Alt']]
+const PREF_LABELS: [keyof typeof prefs, string][] = [['spacing', 'Show padding & margin'], ['snap', 'Smart snapping'], ['alwaysMeasure', 'Measure without holding Alt'], ['persist', 'Remember edits across reloads']]
 function Settings({ theme, setTheme, onClose }: { theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void; onClose: () => void }) {
   const [, force] = useState(0)
   return (
@@ -1221,7 +1306,7 @@ const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide,
   const [tab, setTab] = useState<'design' | 'prototype'>('design')
   const [menu, setMenu] = useState(false)
   const [copied, setCopied] = useState(false)
-  const n = [...changes.values()].reduce((s, p) => s + p.size, 0)
+  const n = [...liveEdits().values()].reduce((s, p) => s + p.size, 0)
   const copy = () => { navigator.clipboard?.writeText(exportCSS()); setCopied(true); setTimeout(() => setCopied(false), 1200) }
   return (
     <>
@@ -2476,8 +2561,32 @@ function Overlay() {
     if (!cv.on) enterCanvas()
     else leaveCanvas()
   }
-  const close = () => { if (!cv.on || leaveCanvas()) setOpen(false) }
+  const close = () => { if (!cv.on || leaveCanvas()) { saveNow(); setOpen(false) } }
   L.toggleCanvas = toggleCanvas
+  const saveNow = () => { if (!FRAME && prefs.persist && restoredPages.has(pageKey())) writePage(capturePage(L.guides)) }
+  // restore this page's saved session once per load (after the app has had a moment to render)
+  useEffect(() => {
+    if (FRAME || !open || !prefs.persist || restoredPages.has(pageKey())) return
+    const t = setTimeout(() => {
+      restoredPages.add(pageKey())
+      const page = readSession()[pageKey()]
+      if (!page) return
+      const { applied, missed } = restorePage(page)
+      if (page.guides?.length) setGuides(page.guides)
+      if (applied || page.guides?.length) {
+        notify(`Restored ${applied} edit${applied === 1 ? '' : 's'} from your last session${missed ? ` · ${missed} no longer match the page` : ''}`,
+          { label: 'Discard', run: () => { if (cv.on) exitCanvas(); resetEdits(); setGuides([]); writePage(null) } })
+      }
+      bump()
+    }, 300)
+    return () => clearTimeout(t)
+  }, [open, href])
+  // autosave (debounced) whenever edits or guides change
+  useEffect(() => {
+    if (FRAME || !open) return
+    const t = setTimeout(saveNow, 400)
+    return () => clearTimeout(t)
+  }, [rev, guides, open, href]) // eslint-disable-line react-hooks/exhaustive-deps
   L.close = close
 
   const startResize = (e: RPointerEvent, dir: string) => {
@@ -2578,7 +2687,9 @@ function Overlay() {
     if (FRAME) return null
     return (
       <div className="root" data-theme={theme}>
-        <button className="launch ui" data-tip="Watcher · Alt D" onClick={() => setOpen(true)}><Mark size={26} /></button>
+        <button className="launch ui" data-tip={readSession()[pageKey()] ? 'Watcher · Alt D · unapplied edits saved' : 'Watcher · Alt D'} onClick={() => setOpen(true)}>
+          <Mark size={26} />{!FRAME && prefs.persist && readSession()[pageKey()] && <i className="launch-dot" />}
+        </button>
       </div>
     )
   }
@@ -3026,6 +3137,7 @@ const CSS_TEXT = `
 
 .launch { all: unset; position: absolute; right: 16px; bottom: 16px; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--surface); color: var(--text); box-shadow: var(--shadow-raised); cursor: pointer; }
 .launch:hover { box-shadow: var(--shadow-raised), 0 0 0 2px var(--primary); }
+.launch-dot { position: absolute; top: 4px; right: 4px; width: 9px; height: 9px; border-radius: 50%; background: oklch(62% .2 300); box-shadow: 0 0 0 2px var(--surface); }
 .mark { position: relative; display: grid; padding: 0 2px; }
 
 /* stage */

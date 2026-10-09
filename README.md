@@ -49,6 +49,10 @@ Edit an element, then open **Apply to code** (in the toolbar, or the `</>` butto
 
 The plugin only runs on the dev server, only writes `.jsx`/`.tsx` files inside your project, and only accepts same-origin requests. Your editor's git diff is the review step.
 
+## Sessions
+
+Edits you haven't applied yet, added elements, guides and canvas mode are saved in your browser, per page, and come back when you reload. A toast says how many were restored, with **Discard** to drop them. The launcher shows a dot when a page has saved work. Applying edits to code or undoing them removes them from the session. Turn it off under Settings → *Remember edits across reloads*.
+
 ## What it costs your app
 
 | | |

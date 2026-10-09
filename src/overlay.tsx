@@ -1,4 +1,5 @@
-/**
+/** @watcher-ignore (the Vite plugin must not stamp the overlay itself)
+ *
  * Watcher: the overlay itself. Loaded lazily by ./index.ts, never imported by production builds.
  *
  * Alt+D toggles it. Every edit is an inline style on the live DOM, so it's gone on reload.
@@ -909,6 +910,7 @@ function Crumbs({ el, select }: { el: HTMLElement; select: (el: HTMLElement | nu
         </Fragment>
       ))}
       {name && <div className="compname"><Icon d={P.comp} size={13} />{reactName(el) ? name : <>in &lt;{name}&gt;</>}</div>}
+      {sourceOf(el) && <button className="srclink" data-tip="Open in your editor" onClick={() => openInEditor(el)}><Icon d={P.code} size={12} />{sourceOf(el)!.file}:{sourceOf(el)!.line}</button>}
     </div>
   )
 }
@@ -1212,9 +1214,9 @@ const Help = () => (
 type InspectorProps = {
   el: HTMLElement | null; rev: number; select: (el: HTMLElement | null) => void
   guide: Guide | null; updateGuide: (p: Partial<Guide>) => void; removeGuide: () => void
-  theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void; onClose: () => void
+  theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void; onClose: () => void; onCode: () => void
 }
-const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide, removeGuide, theme, setTheme, onClose }: InspectorProps) {
+const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide, removeGuide, theme, setTheme, onClose, onCode }: InspectorProps) {
   void rev // re-render trigger only
   const [tab, setTab] = useState<'design' | 'prototype'>('design')
   const [menu, setMenu] = useState(false)
@@ -1240,6 +1242,7 @@ const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide,
       {!guide && (
         <div className="foot">
           <span>{n ? `${n} edit${n > 1 ? 's' : ''}` : 'No edits yet'}</span>
+          <button className="b sm" disabled={!n} onClick={onCode} data-tip="Apply to code"><Icon d={P.code} /></button>
           <button className="b sm" disabled={!n} onClick={copy} data-tip="Copy edits as CSS"><Icon d={copied ? P.check : P.copy} /></button>
           <button className="b sm" disabled={!n} onClick={() => resetEdits()} data-tip="Reset all edits"><Icon d={P.undo} /></button>
         </div>
@@ -1621,6 +1624,156 @@ function Profiler() {
   )
 }
 
+// ── write-back: inspector edits → Tailwind classes in your JSX (via watcher-ui/vite) ──
+type SrcResult = { loc: string; ok: boolean; error?: string; note?: string; before?: string; after?: string; text?: boolean
+  mapped: { prop: string; value: string; cls: string }[]; skipped: { prop: string; value: string; reason: string }[] }
+type ApplyResponse = { files: { file: string; changed: boolean; results: SrcResult[] }[]; error?: string }
+type Pending = { els: HTMLElement[]; file: string; loc: string; line: number; styles: Record<string, string>; text?: string; attrs?: Record<string, string | null>; variant: string; repeats: number }
+const BREAKPOINTS: [string, number][] = [['sm', 640], ['md', 768], ['lg', 1024], ['xl', 1280], ['2xl', 1536]]
+/** "file:line:col" stamped by the Vite plugin. */
+function sourceOf(el: Element) {
+  const m = /^(.*):(\d+):(\d+)$/.exec(el.getAttribute('data-wsrc') ?? '')
+  return m ? { file: m[1], line: +m[2], col: +m[3], loc: `${m[2]}:${m[3]}` } : null
+}
+const openInEditor = (el: Element) => { const s = sourceOf(el); if (s) void fetch(`/__open-in-editor?file=${encodeURIComponent(`${s.file}:${s.line}:${s.col + 1}`)}`) }
+/** Edits that can go to source, grouped by the JSX element they came from. */
+function pendingEdits() {
+  const byKey = new Map<string, Pending>(), orphans: HTMLElement[] = []
+  for (const [el, props] of changes) {
+    if (!el.isConnected) continue
+    const styles: Record<string, string> = {}, attrs: Record<string, string | null> = {}
+    let text: string | undefined
+    for (const p of props) {
+      if (p === '#text') text = el.textContent?.trim() ?? ''
+      else if (p[0] === '@') attrs[p.slice(1)] = el.getAttribute(p.slice(1))
+      else if (p[0] !== '#') { const v = el.style.getPropertyValue(p); if (v) styles[p] = /^rgba?\(/.test(v) ? colorOut(v) : v } // the browser hands back rgb(); classes read better as hex
+    }
+    if (!Object.keys(styles).length && !Object.keys(attrs).length && text === undefined) continue
+    const src = sourceOf(el)
+    if (!src) { orphans.push(el); continue }
+    // edits made inside a responsive preview get that width's Tailwind breakpoint (mobile-first)
+    const w = el.ownerDocument === document ? 0 : el.ownerDocument.defaultView?.innerWidth ?? 0
+    const bp = w ? BREAKPOINTS.filter(([, min]) => w >= min).at(-1)?.[0] : undefined
+    const variant = bp ? bp + ':' : ''
+    const key = `${src.file}|${src.loc}|${variant}`
+    const prev = byKey.get(key)
+    if (prev) { prev.els.push(el); Object.assign(prev.styles, styles); continue }
+    byKey.set(key, {
+      els: [el], file: src.file, loc: src.loc, line: src.line, variant, text, styles,
+      attrs: Object.keys(attrs).length ? attrs : undefined,
+      repeats: el.ownerDocument.querySelectorAll(`[data-wsrc="${el.getAttribute('data-wsrc')!.replace(/"/g, '\\"')}"]`).length,
+    })
+  }
+  return { items: [...byKey.values()], orphans }
+}
+async function postApply(items: Pending[], dryRun: boolean): Promise<ApplyResponse> {
+  const r = await fetch('/__watcher/apply', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' },
+    body: JSON.stringify({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant }) => ({ file, loc, styles, text, attrs, variant })) }),
+  })
+  return r.json()
+}
+/** After a successful write: the source now carries the change, so drop our inline preview of it. */
+function settle(it: Pending, r: SrcResult) {
+  const done = new Set([...r.mapped.map(m => m.prop), ...(r.text ? ['#text'] : []), ...Object.keys(it.attrs ?? {}).map(a => '@' + a)])
+  for (const el of it.els) {
+    for (let i = hist.length - 1; i >= 0; i--) if (hist[i].el === el && done.has(hist[i].prop)) hist.splice(i, 1)
+    const set = changes.get(el)
+    for (const p of done) set?.delete(p)
+    if (set && !set.size) changes.delete(el)
+    // keep the inline style until hot reload has put the new classes on the element, then remove it
+    const styles = r.mapped.map(m => m.prop)
+    if (!styles.length) continue
+    const drop = () => { mo.disconnect(); clearTimeout(t); for (const p of styles) el.style.removeProperty(p); bump() }
+    const mo = new MutationObserver(drop), t = setTimeout(drop, 2500)
+    mo.observe(el, { attributes: true, attributeFilter: ['class'] })
+  }
+  redos.length = 0
+}
+function ClassDiff({ before, after }: { before: string; after: string }) {
+  const b = before.split(/\s+/).filter(Boolean), a = after.split(/\s+/).filter(Boolean)
+  return (
+    <div className="cdiff">
+      {b.filter(c => !a.includes(c)).map(c => <code key={'-' + c} className="del">{c}</code>)}
+      {a.map(c => <code key={c} className={b.includes(c) ? 'keep' : 'add'}>{c}</code>)}
+    </div>
+  )
+}
+function CodePanel({ rev }: { rev: number }) {
+  void rev
+  const [server, setServer] = useState<'checking' | 'missing' | number>('checking')
+  const [plan, setPlan] = useState<ApplyResponse | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    fetch('/__watcher/ping').then(r => (r.ok ? r.json() : null)).then(j => setServer(j?.ok ? j.tailwind : 'missing')).catch(() => setServer('missing'))
+  }, [])
+  const { items, orphans } = pendingEdits()
+  const key = JSON.stringify(items.map(i => [i.file, i.loc, i.variant, i.styles, i.text, i.attrs]))
+  useEffect(() => {
+    if (typeof server !== 'number' || !items.length) { setPlan(null); return }
+    let alive = true
+    postApply(items, true).then(p => { if (alive) setPlan(p) }).catch(() => {})
+    return () => { alive = false }
+  }, [key, server]) // eslint-disable-line react-hooks/exhaustive-deps
+  const resultFor = (it: Pending) => plan?.files.find(f => f.file === it.file)?.results.find(r => r.loc === it.loc)
+  const writable = items.filter(it => { const r = resultFor(it); return r?.ok && (r.mapped.length || r.text || it.attrs) })
+  const apply = async () => {
+    setBusy(true)
+    try {
+      const res = await postApply(writable, false)
+      let n = 0
+      for (const it of writable) { const r = res.files.find(f => f.file === it.file)?.results.find(x => x.loc === it.loc); if (r?.ok) { settle(it, r); n++ } }
+      const files = res.files.filter(f => f.changed).length
+      notify(`Wrote ${n} element${n === 1 ? '' : 's'} to ${files} file${files === 1 ? '' : 's'}`)
+      bump()
+    } catch (e) { notify(`Couldn't write: ${(e as Error).message}`) }
+    setBusy(false)
+  }
+  return (
+    <>
+      <div className="pb">
+        {server === 'missing' && (
+          <div className="cnote">
+            <b>Connect your source</b>
+            <p>Add the Watcher plugin to your Vite config to write edits back to your JSX as Tailwind classes:</p>
+            <pre>{`import { watcher } from 'watcher-ui/vite'
+
+plugins: [watcher(), react(), tailwindcss()]`}</pre>
+          </div>
+        )}
+        {typeof server === 'number' && !items.length && <p className="empty pad">No edits yet. Change something in the inspector and it shows up here as Tailwind {server === 3 ? 'v3' : 'v4'} classes, ready to write to your code.</p>}
+        {items.map(it => {
+          const r = resultFor(it)
+          return (
+            <div key={it.file + it.loc + it.variant} className="citem">
+              <div className="chead">
+                <b>{label(it.els[0])}</b>
+                {it.variant && <span className="cvar" data-tip="Edited in a responsive preview, so it applies from this breakpoint up">{it.variant}</span>}
+                <span className="sp" />
+                <button className="clink" data-tip="Open in your editor" onClick={() => openInEditor(it.els[0])}>{it.file.split('/').pop()}:{it.line}</button>
+              </div>
+              {it.repeats > 1 && <p className="cwarn">This line renders {it.repeats} elements; the change applies to all of them.</p>}
+              {r?.error && <p className="cerr">{r.error}</p>}
+              {r && !r.error && r.before != null && r.after != null && r.before !== r.after && <ClassDiff before={r.before} after={r.after} />}
+              {r?.mapped.map(m => <div key={m.prop} className="cmap"><span>{m.prop}: {m.value}</span><code>{m.cls}</code></div>)}
+              {r?.text && <div className="cmap"><span>text</span><code>“{it.text}”</code></div>}
+              {it.attrs && Object.entries(it.attrs).map(([k, v]) => <div key={k} className="cmap"><span>{k}</span><code>{v ?? 'removed'}</code></div>)}
+              {r?.skipped.map(sk => <div key={sk.prop} className="cskip">{sk.prop}: {sk.reason}</div>)}
+              {r?.note && <p className="cnote2">{r.note}</p>}
+              <button className="b sm cdiscard" onClick={() => it.els.forEach(el => resetEdits(el))}>Discard</button>
+            </div>
+          )
+        })}
+        {orphans.length > 0 && <p className="empty pad">{orphans.length} edited element{orphans.length === 1 ? ' isn’t' : 's aren’t'} in your source (a library component, or added in canvas mode), so {orphans.length === 1 ? 'it' : 'they'} can only be copied as CSS.</p>}
+      </div>
+      <div className="foot">
+        <span>{writable.length ? `${writable.length} ready` : typeof server === 'number' ? 'Nothing to write' : server === 'missing' ? 'Plugin not found' : 'Connecting…'}</span>
+        <button className="b sm apply" disabled={busy || !writable.length} onClick={apply}><Icon d={P.code} size={14} />{busy ? 'Writing…' : 'Apply to code'}</button>
+      </div>
+    </>
+  )
+}
+
 // ── sidebar pieces ──────────────────────────────────────────────────────────
 function Group({ title, n, grow, right, children }: { title: string; n?: number; grow?: boolean; right?: ReactNode; children: ReactNode }) {
   const [open, setOpen] = useState(true)
@@ -1933,7 +2086,7 @@ function Overlay() {
   const [guides, setGuides] = useState<Guide[]>([])
   const [dragging, setDragging] = useState<number | null>(null)
   const [show, setShow] = useState({ rulers: true, layers: true, inspector: true })
-  const [right, setRight] = useState<'inspect' | 'ds' | 'perf'>('inspect')
+  const [right, setRight] = useState<'inspect' | 'ds' | 'perf' | 'code'>('inspect')
   const [grid, setGrid] = useState(false)
   const [filter, setFilter] = useState('')
   const [settings, setSettings] = useState(false)
@@ -2355,6 +2508,7 @@ function Overlay() {
   const updateGuide = useCallback((patch: Partial<Guide>) => setGuides(gs => gs.map(g => (g.id === selGuide ? { ...g, ...patch } : g))), [selGuide])
   const removeGuide = useCallback(() => { setGuides(gs => gs.filter(g => g.id !== selGuide)); setSelGuide(null) }, [selGuide])
   const closeInspector = useCallback(() => setShow(v => ({ ...v, inspector: false })), [])
+  const openCode = useCallback(() => setRight('code'), [])
 
   // vector editing: drag anchors / handles, double-click toggles smooth ↔ corner, click the outline to add a point
   const startNode = (e: RPointerEvent, si: number, ni: number, part: 'anchor' | 'in' | 'out') => {
@@ -2690,6 +2844,7 @@ function Overlay() {
         <button className={'b' + (right === 'perf' ? ' tg' : '')} data-tip="Profiler" onClick={() => { setRight(r => (r === 'perf' ? 'inspect' : 'perf')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.pulse} /></button>
         <button className={'b' + (resp ? ' on' : '')} data-tip="Responsive · ⇧V" onClick={() => { closeSvgEditor(); setResp(r => (r ? null : DEFAULT_RESP)) }}><Icon d={P.devices} /></button>
         <i className="sep" />
+        <button className={'b' + (right === 'code' ? ' tg' : '')} data-tip="Apply to code" onClick={() => { setRight(r => (r === 'code' ? 'inspect' : 'code')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.code} /></button>
         <button className="b" data-tip="Undo · Ctrl Z" disabled={!hist.length} onClick={undo}><Icon d={P.undo} /></button>
         <button className="b" data-tip="Redo · Ctrl ⇧Z" disabled={!redos.length} onClick={redo}><Icon d={P.redo} /></button>
         {strokes.length > 0 && <button className="b" data-tip="Clear drawings" onClick={() => { strokes.length = 0; bump() }}><Icon d={P.trash} /></button>}
@@ -2726,8 +2881,9 @@ function Overlay() {
           {editing ? <VectorPanel onDone={closeSvgEditor} />
             : right === 'ds' ? <><PanelHead title="Design system" icon={P.palette} onClose={() => setRight('inspect')} /><DesignSystem /></>
             : right === 'perf' ? <><PanelHead title="Profiler" icon={P.pulse} onClose={() => setRight('inspect')} /><Profiler /></>
+            : right === 'code' ? <><PanelHead title="Apply to code" icon={P.code} onClose={() => setRight('inspect')} /><CodePanel rev={rev} /></>
             : <Inspector el={sel} rev={rev} select={select} guide={guides.find(g => g.id === selGuide) ?? null}
-              updateGuide={updateGuide} removeGuide={removeGuide} theme={theme} setTheme={setTheme} onClose={closeInspector} />}
+              updateGuide={updateGuide} removeGuide={removeGuide} theme={theme} setTheme={setTheme} onClose={closeInspector} onCode={openCode} />}
         </div>
       )}
 
@@ -2874,6 +3030,33 @@ const CSS_TEXT = `
 
 /* stage */
 .stage { position: absolute; inset: 0; overflow: visible; }
+/* apply to code */
+.srclink { all: unset; width: 100%; display: flex; align-items: center; gap: 5px; margin-top: 2px; color: var(--text-muted); font: 500 11px var(--mono); cursor: pointer; position: relative; }
+.srclink:hover { color: var(--primary); }
+.citem { padding: 12px; display: grid; gap: 6px; border-bottom: 1px solid var(--border-soft); }
+.chead { display: flex; align-items: center; gap: 6px; }
+.chead b { font-weight: 600; }
+.chead .sp { flex: 1; }
+.clink { all: unset; position: relative; color: var(--text-muted); font: 500 11px var(--mono); cursor: pointer; }
+.clink:hover { color: var(--primary); }
+.cvar { position: relative; padding: 0 5px; border-radius: 4px; background: oklch(58% .2 300 / .15); color: oklch(52% .2 300); font: 600 10px/16px var(--mono); }
+.cdiff { display: flex; flex-wrap: wrap; gap: 4px; }
+.cdiff code { padding: 1px 6px; border-radius: 4px; font: 500 11px/18px var(--mono); }
+.cdiff .keep { background: var(--input); color: var(--text-muted); }
+.cdiff .add { background: oklch(62% .17 150 / .14); color: oklch(48% .15 150); }
+.cdiff .del { background: oklch(60% .22 25 / .12); color: oklch(52% .2 25); text-decoration: line-through; }
+.cmap { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-muted); }
+.cmap code { color: var(--text); font: 500 11px var(--mono); }
+.cskip { font-size: 11px; color: var(--text-x); }
+.cwarn, .cerr, .cnote2 { margin: 0; font-size: 11px; line-height: 15px; }
+.cwarn { color: oklch(62% .15 75); } .cerr { color: oklch(56% .2 25); } .cnote2 { color: var(--text-x); }
+.cdiscard { justify-self: start; margin-top: 2px; }
+.cnote { margin: 12px; padding: 12px; display: grid; gap: 8px; border-radius: 8px; background: var(--input); }
+.cnote p { margin: 0; color: var(--text-muted); line-height: 17px; }
+.cnote pre { margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--surface); font: 500 11px/16px var(--mono); white-space: pre-wrap; }
+.foot .apply { background: var(--primary); color: var(--on-primary); padding: 0 10px; font-weight: 600; }
+.foot .apply:hover { background: var(--primary); color: var(--on-primary); filter: brightness(1.05); }
+
 /* anatomy */
 .stage .an-dim { fill: oklch(0% 0 0 / .52); }
 .stage .an-bg.pad { fill: color-mix(in oklch, var(--primary) 16%, transparent); } .stage .an-ln.pad { stroke: var(--primary); }

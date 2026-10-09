@@ -30,7 +30,7 @@ const MAP: Record<string, Src> = {
   sideR: 'square_righthalf_fill', dropper: 'eyedropper_full', grid: 'square_grid_2x2', search: 'search', page: 'doc',
   canvas: 'square_fill_on_square_fill',
   phone: 'device_phone_portrait', tablet: 'device_tablet_portrait', desktop: 'desktopcomputer', laptop: 'device_laptop',
-  orient: 'rotate_right', devices: 'rectangle_3_offgrid',
+  orient: 'rotate_right', devices: 'rectangle_3_offgrid', code: 'chevron_left_slash_chevron_right',
 }
 
 const require = createRequire(import.meta.url)

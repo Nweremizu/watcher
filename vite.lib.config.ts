@@ -15,9 +15,10 @@ export default defineConfig({
     sourcemap: true,
     target: 'es2022',
     minify: true,
-    lib: { entry: { index: 'src/index.ts', noop: 'src/noop.ts' }, formats: ['es'] },
+    lib: { entry: { index: 'src/index.ts', noop: 'src/noop.ts', vite: 'src/vite.ts' }, formats: ['es'] },
     rollupOptions: {
-      external: [/^react($|\/)/, /^react-dom($|\/)/],
+      // vite.js runs in Node (the dev server): keep its parser deps and node builtins external
+      external: [/^react($|\/)/, /^react-dom($|\/)/, /^node:/, /^vite$/, '@babel/parser', 'magic-string'],
       output: { chunkFileNames: '[name]-[hash].js' },
     },
   },

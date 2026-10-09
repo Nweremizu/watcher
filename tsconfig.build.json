@@ -8,5 +8,9 @@
     "rootDir": "src",
     "types": []
   },
-  "include": ["src/index.ts", "src/noop.ts"]
+  "include": [
+    "src/index.ts",
+    "src/noop.ts",
+    "src/vite.ts"
+  ]
 }

@@ -1,3 +1,8 @@
+/* Tailwind utilities only (no preflight), so the rest of the demo keeps its plain CSS */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@source "./";
+
 :root { --brand: #f38020; --brand-soft: oklch(93% .04 60); --radius: 12px; --text-muted: #666; }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: system-ui, sans-serif; color: #1d1f24; background: #fafafa; }
@@ -12,10 +17,6 @@ main { max-width: 960px; margin: 0 auto; padding: 24px; }
 .hero p { color: #666; font-size: 18px; margin: 0 auto 28px; max-width: 520px; }
 .row { display: flex; gap: 12px; justify-content: center; }
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-.card { background: #fff; border-radius: var(--radius); padding: 20px; box-shadow: 0 0 0 1px #eee, 0 2px 8px rgba(0,0,0,.04); }
-.card h3 { margin: 12px 0 6px; }
-.card p { margin: 0; color: #666; line-height: 1.5; }
-.dot { width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, var(--brand-soft), #fbd3b0); }
 .foot { margin-top: 64px; color: #999; text-align: center; font-size: 13px; }
 .logo { display: flex; align-items: center; gap: 8px; }
 .page { padding: 56px 0 24px; }

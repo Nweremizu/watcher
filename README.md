@@ -25,6 +25,30 @@ Press **Alt D** (or click the button in the bottom-right corner) to open it.
 
 Not using React components at the mount point? `mountWatcher()` does the same and returns a cleanup function.
 
+## Write edits back to your code (Tailwind)
+
+Add the Vite plugin and inspector edits can be written into your JSX as Tailwind classes:
+
+```ts
+// vite.config.ts
+import { watcher } from 'watcher-ui/vite'
+
+export default defineConfig({
+  plugins: [watcher(), react(), tailwindcss()],
+})
+```
+
+Edit an element, then open **Apply to code** (in the toolbar, or the `</>` button under the inspector). Each element shows its file and line, the class diff, and how every value maps (`padding-top: 44px → pt-11`). Click **Apply to code** and the plugin rewrites the className, hot reload takes over, and the live preview is cleared.
+
+- **Styles** become Tailwind utilities on the scale where possible (`pt-11`, `text-5xl`, `rounded-xl`) and arbitrary values otherwise (`text-[#d4570f]`, `w-[293px]`). The class for the same property is replaced; `md:`/`hover:` variants are left alone.
+- **Text** and **attributes** (href, alt, aria-*) are written too, when the JSX holds them literally.
+- **Responsive previews** write with the matching breakpoint: an edit made in the 820px preview becomes `md:gap-6`.
+- It edits plain `className` strings, static templates, and the first string passed to `cn()` / `clsx()`. Fully computed classNames are left for you to edit by hand.
+- Elements rendered by a `.map()` share one line of JSX, so the panel warns that the change applies to all of them.
+- Drag offsets, canvas-mode positions and elements from libraries aren't written; the panel says why.
+
+The plugin only runs on the dev server, only writes `.jsx`/`.tsx` files inside your project, and only accepts same-origin requests. Your editor's git diff is the review step.
+
 ## What it costs your app
 
 | | |

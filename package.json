@@ -22,6 +22,10 @@
       "production": "./dist/noop.js",
       "default": "./dist/index.js"
     },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "default": "./dist/vite.js"
+    },
     "./package.json": "./package.json"
   },
   "module": "./dist/index.js",
@@ -32,23 +36,36 @@
   ],
   "peerDependencies": {
     "react": ">=18",
-    "react-dom": ">=18"
+    "react-dom": ">=18",
+    "vite": ">=5"
   },
   "scripts": {
     "dev": "vite",
     "build": "vite build --config vite.lib.config.ts && tsc -p tsconfig.build.json",
-    "check": "tsc --noEmit && node checks/path.check.ts",
+    "check": "tsc --noEmit && node checks/path.check.ts && node checks/writeback.check.ts",
     "icons": "npm i -D framework7-icons@latest && node scripts/icons.ts",
     "prepublishOnly": "npm run check && npm run build"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "framework7-icons": "^5.0.5",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
+  },
+  "dependencies": {
+    "@babel/parser": "^8.0.7",
+    "magic-string": "^1.4.3"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
   }
 }

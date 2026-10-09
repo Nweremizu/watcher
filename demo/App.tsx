@@ -28,10 +28,10 @@ function Hero() {
 }
 function FeatureCard({ title, body }: { title: string; body: string }) {
   return (
-    <article className="card">
-      <div className="dot" />
-      <h3>{title}</h3>
-      <p>{body}</p>
+    <article className="card rounded-xl bg-white p-5 shadow-[0_0_0_1px_#eee,0_2px_8px_rgba(0,0,0,.04)]">
+      <div className="size-8 rounded-lg bg-[#fde6d2]" />
+      <h3 className="mt-3 mb-1.5 text-lg font-bold">{title}</h3>
+      <p className="m-0 leading-normal text-[#666]">{body}</p>
     </article>
   )
 }

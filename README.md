@@ -49,6 +49,16 @@ Edit an element, then open **Apply to code** (in the toolbar, or the `</>` butto
 
 The plugin only runs on the dev server, only writes `.jsx`/`.tsx` files inside your project, and only accepts same-origin requests. Your editor's git diff is the review step.
 
+## Component props
+
+Select anything inside a component and the inspector lists that component's props. Text, number and boolean props can be edited live. Other props, such as functions, elements and objects, are shown read-only. Prop edits are undoable. **Apply to code** writes them where the component is *used* (`<FeatureCard title="…" />`), not inside it. A prop that your code sets with an expression is left for you to edit by hand.
+
+Live editing uses React's DevTools hook, which the Vite plugin installs before React loads. The React DevTools extension provides the same hook. Like in React DevTools, an edited prop holds until the parent re-renders with its own value. Prop edits aren't kept across reloads.
+
+## Forced states
+
+The **Default · Hover · Focus · Active** bar at the top of the inspector shows the selected element in that state. This works with your real CSS, including Tailwind `hover:` and `group-hover:`, because Watcher mirrors each rule that uses a state onto an attribute it can toggle. Hover and active also apply to ancestors, and focus gives ancestors `focus-within`, just as a real pointer would. While a state is showing, inspector edits apply only to that state and are written as `hover:` / `focus:` / `active:` classes, combined with the breakpoint when made in a responsive preview (`md:hover:…`).
+
 ## Sessions
 
 Edits you haven't applied yet, added elements, guides and canvas mode are saved in your browser, per page, and come back when you reload. A toast says how many were restored, with **Discard** to drop them. The launcher shows a dot when a page has saved work. Applying edits to code or undoing them removes them from the session. Turn it off under Settings → *Remember edits across reloads*.

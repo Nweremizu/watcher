@@ -9,18 +9,19 @@ export type ElementEdit = {
   styles?: Record<string, string>
   text?: string
   attrs?: Record<string, string | null>
-  variant?: string // Tailwind variant for responsive edits, e.g. 'md:'
+  variant?: string // Tailwind variant for responsive / state edits, e.g. 'md:' or 'hover:'
+  props?: Record<string, unknown> // component props, written where the component is used; null removes one
 }
 export type EditResult = {
   loc: string; ok: boolean; error?: string; note?: string
-  before?: string; after?: string; mapped: Mapped[]; skipped: Skipped[]; text?: boolean
+  before?: string; after?: string; mapped: Mapped[]; skipped: Skipped[]; text?: boolean; props?: string[]; variant?: string
 }
 
 // minimal Babel AST shapes we touch
 type Pos = { line: number; column: number }
 type N = { type: string; start: number; end: number; loc: { start: Pos }; [k: string]: unknown }
 type Attr = N & { name: N & { name: string }; value: (N & { value?: string; expression?: N }) | null }
-type Opening = N & { name: N & { name?: string }; attributes: Attr[] }
+type Opening = N & { name: N & { name?: string; property?: { name: string } }; attributes: Attr[]; typeArguments?: N; typeParameters?: N }
 type El = N & { openingElement: Opening; children: (N & { value?: string })[] }
 
 export const parseJSX = (code: string) =>
@@ -36,6 +37,14 @@ export function walk(node: unknown, fn: (n: N) => void) {
 }
 
 const isIntrinsic = (o: Opening) => o.name.type === 'JSXIdentifier' && /^[a-z]/.test(o.name.name ?? '')
+/** Where a new attribute goes: after the tag name and any `<Select<T>` type arguments. */
+const afterName = (o: Opening) => (o.typeArguments ?? o.typeParameters)?.end ?? o.name.end
+/** `="text"` when that's safe in JSX, else `={expression}`; `true` becomes a bare attribute. */
+const jsxValue = (v: unknown) => (v === true ? '' : typeof v === 'string' && !/["&\n]/.test(v) ? `="${v}"` : `={${JSON.stringify(v)}}`)
+const LITERAL = /^(String|Numeric|Boolean|Null)Literal$/
+const isLiteral = (v: N & { expression?: N & { expressions?: N[] } }) =>
+  LITERAL.test(v.type) || (v.type === 'JSXExpressionContainer' && !!v.expression &&
+    (LITERAL.test(v.expression.type) || (v.expression.type === 'TemplateLiteral' && !v.expression.expressions?.length)))
 
 export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 4) {
   const ast = parseJSX(code)
@@ -45,11 +54,28 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
   const results: EditResult[] = []
 
   for (const e of edits) {
-    const r: EditResult = { loc: e.loc, ok: true, mapped: [], skipped: [] }
+    const r: EditResult = { loc: e.loc, variant: e.variant, ok: true, mapped: [], skipped: [] }
     results.push(r)
     const el = byLoc.get(e.loc)
     if (!el) { r.ok = false; r.error = 'element not found at this position (file changed? reload the page)'; continue }
     const op = el.openingElement
+    const attrOf = (name: string) => op.attributes.find(a => a.type === 'JSXAttribute' && a.name.name === name)
+    const setAttr = (name: string, value: unknown) => {
+      const a = attrOf(name)
+      if (value == null) { if (a) ms.remove(a.start - 1, a.end); return } // drop the attribute and its leading space
+      const v = jsxValue(value)
+      if (!a) ms.appendLeft(afterName(op), ` ${name}${v}`)
+      else if (a.end > a.name.end) { if (v) ms.overwrite(a.name.end, a.end, v); else ms.remove(a.name.end, a.end) }
+      else if (v) ms.appendLeft(a.end, v)
+    }
+    const writeText = (t: string) => {
+      const kids = el.children
+      if (!kids.length || !kids.every(k => k.type === 'JSXText')) return 'text mixes in expressions or elements; edit it by hand'
+      // plain JSX text when safe, otherwise a string expression
+      const safe = /^[^{}<>\n]*$/.test(t) && t === t.trim()
+      ms.overwrite(kids[0].start, kids[kids.length - 1].end, safe ? t : `{${JSON.stringify(t)}}`)
+      return null
+    }
 
     if (e.styles && Object.keys(e.styles).length) {
       const attr = op.attributes.find(a => a.type === 'JSXAttribute' && a.name.name === 'className')
@@ -67,35 +93,43 @@ export function editSource(code: string, edits: ElementEdit[], ver: TwVersion = 
       const m = mergeClasses(before, e.styles, e.variant ?? '', ver)
       r.before = before; r.after = m.className; r.mapped = m.mapped; r.skipped = m.skipped
       if (m.className !== before) {
-        if (!lit) ms.appendLeft(op.name.end, ` className="${m.className}"`)
+        if (!lit) ms.appendLeft(afterName(op), ` className="${m.className}"`)
         else if (lit.type === 'TemplateLiteral') ms.overwrite(lit.start + 1, lit.end - 1, m.className)
         else { const q = code[lit.start]; ms.overwrite(lit.start, lit.end, q + m.className + q) }
       }
     }
 
-    if (e.attrs) for (const [name, value] of Object.entries(e.attrs)) {
-      const a = op.attributes.find(x => x.type === 'JSXAttribute' && x.name.name === name)
-      if (value == null) { if (a) ms.remove(a.start - 1, a.end); continue } // drop the attribute and its leading space
-      const lit = JSON.stringify(value)
-      if (!a) ms.appendLeft(op.name.end, ` ${name}=${lit}`)
-      else if (a.value) ms.overwrite(a.value.start, a.value.end, lit)
-      else ms.appendLeft(a.end, `=${lit}`)
+    if (e.attrs) for (const [name, value] of Object.entries(e.attrs)) setAttr(name, value)
+
+    if (e.props) for (const [name, value] of Object.entries(e.props)) {
+      const skip = (reason: string) => r.skipped.push({ prop: name, value: String(value), reason })
+      if (name === 'children') {
+        if (typeof value !== 'string') { skip('only text children are written'); continue }
+        const err = writeText(value)
+        if (err) { skip(err); continue }
+      } else {
+        if (value != null && !['string', 'number', 'boolean'].includes(typeof value)) { skip('only text, numbers and booleans are written'); continue }
+        const a = attrOf(name)
+        if (a?.value && !isLiteral(a.value)) { skip('set by an expression in your code; edit it by hand'); continue }
+        setAttr(name, value)
+      }
+      ;(r.props ??= []).push(name)
     }
 
     if (e.text != null) {
-      const kids = el.children
-      if (!kids.length || !kids.every(k => k.type === 'JSXText')) { r.ok = false; r.error = 'text mixes in expressions or elements; edit it by hand'; continue }
-      // plain JSX text when safe, otherwise a string expression
-      const t = e.text
-      const safe = /^[^{}<>\n]*$/.test(t) && t === t.trim()
-      ms.overwrite(kids[0].start, kids[kids.length - 1].end, safe ? t : `{${JSON.stringify(t)}}`)
+      const err = writeText(e.text)
+      if (err) { r.ok = false; r.error = err; continue }
       r.text = true
     }
   }
   return { code: ms.toString(), results }
 }
 
-/** Inject data-wsrc="file:line:col" on every intrinsic element (what the overlay reads to find source). */
+const SKIP_COMPONENT = /^(Fragment|Provider|Consumer)$/ // Fragment rejects extra props; context wrappers render nothing
+const tagName = (o: Opening) => (o.name.type === 'JSXIdentifier' ? o.name.name : o.name.type === 'JSXMemberExpression' ? o.name.property?.name : undefined)
+
+/** Inject data-wsrc="file:line:col" on every intrinsic element (what the overlay reads to find source),
+ *  and data-wsrc-c on component elements (a prop React keeps on the fiber: where to write that component's props). */
 export function stampSource(code: string, file: string) {
   if (code.includes('@watcher-ignore')) return null
   let ast: N
@@ -105,8 +139,10 @@ export function stampSource(code: string, file: string) {
   walk(ast, node => {
     if (node.type !== 'JSXElement') return
     const op = (node as El).openingElement
-    if (!isIntrinsic(op) || op.attributes.some(a => a.type === 'JSXAttribute' && a.name.name === 'data-wsrc')) return
-    ms.appendLeft(op.name.end, ` data-wsrc="${file}:${node.loc.start.line}:${node.loc.start.column}"`)
+    const intrinsic = isIntrinsic(op), attr = intrinsic ? 'data-wsrc' : 'data-wsrc-c'
+    if (!intrinsic && SKIP_COMPONENT.test(tagName(op) ?? 'Fragment')) return
+    if (op.attributes.some(a => a.type === 'JSXAttribute' && a.name.name === attr)) return
+    ms.appendLeft(afterName(op), ` ${attr}="${file}:${node.loc.start.line}:${node.loc.start.column}"`)
     n++
   })
   return n ? ms : null

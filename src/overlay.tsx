@@ -2,19 +2,21 @@
  *
  * Watcher: the overlay itself. Loaded lazily by ./index.ts, never imported by production builds.
  *
- * Alt+D toggles it. Every edit is an inline style on the live DOM, so it's gone on reload.
- * Use "Copy CSS" in the inspector footer to take your edits back to code.
+ * Alt+D toggles it. Edits preview live (inline styles, forced-state rules, prop overrides), are kept per page
+ * until applied or discarded, and go back to source through the Code panel (watcher-ui/vite) or Copy CSS.
  */
 import { Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as RPointerEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { parsePath, serializePath, splitSeg, bezAt, shapeD, type PNode, type Sub } from './path'
 import { ICONS, ICON_VIEWBOX } from './icons'
+import { forceSelectors, hasState } from './states'
 
 type Tool = 'select' | 'text' | 'draw' | 'hand' | 'rect' | 'pen'
 type Guide = { id: number; axis: 'x' | 'y'; pos: number; pattern: 'solid' | 'dashed' | 'dotted'; color?: string; locked?: boolean }
 // prop: CSS property, '#text' = innerHTML, '#node' = inserted node, '@name' = attribute (before '\u0000' = was absent)
-type Edit = { el: HTMLElement; prop: string; before: string; t: number; imp?: boolean; parent?: Node | null; next?: Node | null }
+type Edit = { el: HTMLElement; prop: string; before: string; t: number; imp?: boolean; parent?: Node | null; next?: Node | null; fiber?: Fiber }
+type Fiber = { type: unknown; memoizedProps: Record<string, unknown> | null; return: Fiber | null; alternate: Fiber | null; child: Fiber | null; stateNode: unknown }
 type Box = { l: number; t: number; w: number; h: number }
 type SnapLine = { axis: 'x' | 'y'; pos: number; a: number; b: number }
 type Gesture =
@@ -140,13 +142,13 @@ function ctxOf(el: Element) {
   return { o: { x: r.left, y: r.top }, z: 1 }
 }
 const isSvgEl = (el: Element) => el.namespaceURI === SVGNS // instanceof fails across frames
-function record(el: HTMLElement, prop: string, before: () => string, imp = false) {
+function record(el: HTMLElement, prop: string, before: () => string, imp = false, fiber?: Fiber) {
   const now = Date.now()
   redos.length = 0
   let e: Edit | undefined
   for (let i = hist.length - 1; i >= Math.max(0, hist.length - 4); i--) if (hist[i].el === el && hist[i].prop === prop) { e = hist[i]; break }
   if (e && now - e.t < 1000) e.t = now
-  else hist.push({ el, prop, before: before(), t: now, imp })
+  else hist.push({ el, prop, before: before(), t: now, imp, fiber })
   track(el, prop)
 }
 function setStyle(el: HTMLElement, prop: string, value: string) {
@@ -166,6 +168,8 @@ function invert(e: Edit): Edit {
   if (e.prop === '#unnode') return { ...e, prop: '#node' }
   if (e.prop === '#text') return { ...e, before: el.innerHTML }
   if (e.prop[0] === '@') return { ...e, before: el.getAttribute(e.prop.slice(1)) ?? '\u0000' }
+  if (e.prop[0] === '%') return { ...e, before: encodeProp(currentProps(e.fiber!)[e.prop.slice(1)]) }
+  if (isStateKey(e.prop)) return { ...e, before: getStateRule(el, e.prop) }
   return { ...e, before: el.style.getPropertyValue(e.prop), imp: el.style.getPropertyPriority(e.prop) === 'important' }
 }
 function restore(e: Edit) {
@@ -173,6 +177,8 @@ function restore(e: Edit) {
   else if (e.prop === '#node') e.el.remove()
   else if (e.prop[0] === '@') { const n = e.prop.slice(1); if (e.before === '\u0000') e.el.removeAttribute(n); else e.el.setAttribute(n, e.before) }
   else if (e.prop === '#text') e.el.innerHTML = e.before
+  else if (e.prop[0] === '%') writeProp(e.el, e.fiber!, e.prop.slice(1), e.before)
+  else if (isStateKey(e.prop)) setStateRule(e.el, e.prop, e.before)
   else if (e.before) e.el.style.setProperty(e.prop, e.before, e.imp ? 'important' : '')
   else e.el.style.removeProperty(e.prop)
 }
@@ -196,6 +202,117 @@ function liveEdits() {
   const m = new Map<HTMLElement, Set<string>>()
   for (const h of hist) if (h.prop !== '#node' && h.el.isConnected) { if (!m.has(h.el)) m.set(h.el, new Set()); m.get(h.el)!.add(h.prop) }
   return m
+}
+
+// ── component props: read from React's fiber, overridden through its DevTools renderer ──
+type Renderer = { overrideProps: (f: Fiber, path: string[], v: unknown) => void; overridePropsDeletePath: (f: Fiber, path: string[]) => void }
+const fiberOf = (el: Element) => { const k = Object.keys(el).find(k => k.startsWith('__reactFiber$')); return k ? (el as unknown as Record<string, Fiber>)[k] : null }
+function typeName(t: unknown): string | null {
+  if (!t || typeof t !== 'object' && typeof t !== 'function') return null
+  const x = t as { displayName?: string; name?: string; render?: { displayName?: string; name?: string }; type?: { displayName?: string; name?: string } }
+  return x.displayName || x.name || x.render?.displayName || x.render?.name || x.type?.displayName || x.type?.name || null
+}
+/** Nearest named component above `el`. */
+function componentFiber(el: Element) { for (let f = fiberOf(el)?.return ?? null; f; f = f.return) if (typeName(f.type)) return f; return null }
+/** React keeps two copies of each fiber; the committed one is in the tree that hangs off the root's `current`. */
+function currentFiber(f: Fiber) { let r = f; while (r.return) r = r.return; return (r.stateNode as { current?: Fiber } | null)?.current === r ? f : f.alternate ?? f }
+const currentProps = (f: Fiber) => currentFiber(f).memoizedProps ?? {}
+const hostOf = (f: Fiber) => { for (let c = f.child; c; c = c.child) if (typeof c.type === 'string') return c.stateNode as HTMLElement; return null }
+/** The renderer React gave the DevTools hook (installed by watcher-ui/vite, or by the React DevTools extension). */
+function renderer(doc: Document): Renderer | null {
+  const h = (doc.defaultView as unknown as { __REACT_DEVTOOLS_GLOBAL_HOOK__?: { renderers?: Map<number, Partial<Renderer>> } } | null)?.__REACT_DEVTOOLS_GLOBAL_HOOK__
+  for (const r of h?.renderers?.values() ?? []) if (r.overrideProps) return r as Renderer
+  return null
+}
+const encodeProp = (v: unknown) => (v === undefined ? '\u0000' : JSON.stringify(v))
+function writeProp(el: HTMLElement, f: Fiber, name: string, enc: string) {
+  const r = renderer(el.ownerDocument)
+  if (!r) return
+  if (enc === '\u0000') r.overridePropsDeletePath(currentFiber(f), [name]); else r.overrideProps(currentFiber(f), [name], JSON.parse(enc))
+  setTimeout(bump) // React re-renders in a microtask; refresh the inspector after it
+}
+/** Edit a component prop live. It lasts until the parent re-renders with its own value (as in React DevTools), or you apply it to code. */
+function setProp(f: Fiber, host: HTMLElement, name: string, value: unknown) {
+  record(host, '%' + name, () => encodeProp(currentProps(f)[name]), false, f)
+  writeProp(host, f, name, encodeProp(value))
+}
+
+// ── forced states: show :hover / :focus / :active without the pointer, and edit them ──
+const STATES = ['hover', 'focus', 'active'] as const
+type State = (typeof STATES)[number]
+const forced = new Map<HTMLElement, State>()
+const stateRules = new Map<HTMLElement, Map<string, string>>() // 'hover:color' → value: edits that only apply in that state
+const isStateKey = (p: string) => /^[a-z-]+:/.test(p)
+const getStateRule = (el: HTMLElement, key: string) => stateRules.get(el)?.get(key) ?? ''
+const stateSheets = new WeakMap<Document, { mirror: CSSStyleSheet; edits: CSSStyleSheet }>()
+function sheetsOf(doc: Document) {
+  let s = stateSheets.get(doc)
+  if (!s) {
+    const C = doc.defaultView!.CSSStyleSheet // a frame's sheets must come from its own realm
+    s = { mirror: new C(), edits: new C() }
+    doc.adoptedStyleSheets = [...doc.adoptedStyleSheets, s.mirror, s.edits]
+    stateSheets.set(doc, s)
+  }
+  return s
+}
+/** Every rule that mentions a state, still wrapped in its @media / @layer / @supports. */
+function stateCss(rules: CSSRuleList): string {
+  let out = ''
+  for (const r of rules) {
+    const sub = (r as CSSImportRule).styleSheet
+    if (sub) { try { out += stateCss(sub.cssRules) } catch { /* cross-origin */ } continue }
+    const t = r.cssText
+    if (!hasState(t)) continue
+    const kids = (r as CSSGroupingRule).cssRules
+    out += 'selectorText' in r || !kids ? t + '\n' : t.slice(0, t.indexOf('{')) + '{\n' + stateCss(kids) + '}\n'
+  }
+  return out
+}
+function applyStates(doc: Document) {
+  const s = sheetsOf(doc)
+  let css = ''
+  if ([...forced.keys()].some(el => el.ownerDocument === doc)) for (const sh of doc.styleSheets) { try { css += stateCss(sh.cssRules) } catch { /* cross-origin sheet */ } }
+  try { s.mirror.replaceSync(forceSelectors(css)) } catch { /* leave the previous mirror */ }
+  for (const e of doc.querySelectorAll('[data-wforce]')) e.removeAttribute('data-wforce')
+  const add = (e: Element, t: string) => e.setAttribute('data-wforce', ((e.getAttribute('data-wforce') ?? '') + ' ' + t).trim())
+  for (const [el, st] of forced) {
+    if (el.ownerDocument !== doc || !el.isConnected) continue
+    add(el, st === 'focus' ? 'focus focus-visible focus-within' : st)
+    // a real hover or press applies to every ancestor too (group-hover relies on it); focus gives them focus-within
+    for (let p = el.parentElement; p; p = p.parentElement) add(p, st === 'focus' ? 'focus-within' : st)
+  }
+}
+function forceState(el: HTMLElement, st: State | null) {
+  if (st) forced.set(el, st); else forced.delete(el)
+  applyStates(el.ownerDocument)
+  bump()
+}
+function clearForced() { const docs = new Set([...forced.keys()].map(e => e.ownerDocument)); forced.clear(); docs.forEach(applyStates) }
+/** State edits live in a stylesheet: [data-wsid="7"]:is(:hover, [data-wforce~="hover"]) { … } */
+function setStateRule(el: HTMLElement, key: string, value: string) {
+  let m = stateRules.get(el)
+  if (!m) stateRules.set(el, (m = new Map()))
+  if (value) m.set(key, value); else m.delete(key)
+  el.setAttribute('data-wsid', String(idOf(el)))
+  const doc = el.ownerDocument
+  let css = ''
+  for (const [e, rules] of stateRules) {
+    if (e.ownerDocument !== doc) continue
+    const by = new Map<string, string[]>()
+    for (const [k, v] of rules) { const i = k.indexOf(':'); by.set(k.slice(0, i), [...(by.get(k.slice(0, i)) ?? []), `${k.slice(i + 1)}: ${v} !important;`]) }
+    for (const [st, decls] of by) css += `[data-wsid="${idOf(e)}"]:is(:${st}, [data-wforce~="${st}"]) { ${decls.join(' ')} }\n`
+  }
+  sheetsOf(doc).edits.replaceSync(css)
+}
+function setStateStyle(el: HTMLElement, key: string, value: string) {
+  record(el, key, () => getStateRule(el, key))
+  setStateRule(el, key, value)
+  bump()
+}
+/** Inspector edits: into the forced state when the element is shown in one, else inline. */
+function editStyle(el: HTMLElement, prop: string, value: string) {
+  const st = forced.get(el)
+  if (st) setStateStyle(el, `${st}:${prop}`, value); else setStyle(el, prop, value)
 }
 
 // ── sessions: unapplied work survives reloads (per page, in this browser) ──
@@ -241,7 +358,8 @@ function capturePage(guides: Guide[]): SavedPage {
     if (el.ownerDocument !== document || addedEls.has(el) || insideAdded(el)) continue
     const at = locate(el)
     for (const prop of props) {
-      const value = prop === '#text' ? el.innerHTML : prop[0] === '@' ? el.getAttribute(prop.slice(1)) : el.style.getPropertyValue(prop)
+      if (prop[0] === '%') continue // component props live in React's tree; they don't survive a reload
+      const value = prop === '#text' ? el.innerHTML : prop[0] === '@' ? el.getAttribute(prop.slice(1)) : isStateKey(prop) ? getStateRule(el, prop) : el.style.getPropertyValue(prop)
       if (prop[0] !== '#' && prop[0] !== '@' && !value) continue
       edits.push({ at, prop, value, canvas: inCanvas(lastIndex(el, prop)) })
     }
@@ -266,6 +384,7 @@ function restorePage(page: SavedPage) {
       if (!el) { missed++; continue }
       if (e.prop === '#text') { const before = el.innerHTML; el.innerHTML = e.value ?? ''; pushHist({ el, prop: '#text', before, t: 0 }); track(el, '#text') }
       else if (e.prop[0] === '@') setAttr(el, e.prop.slice(1), e.value ?? '')
+      else if (isStateKey(e.prop)) setStateStyle(el, e.prop, e.value ?? '')
       else setStyle(el, e.prop, e.value ?? '')
       applied++
     }
@@ -665,13 +784,18 @@ function exportCSS() {
   const groups = new Map<number, string[]>() // 0 = the page itself, else the preview's viewport width
   for (const [el, props] of changes) {
     if (!el.isConnected) continue
-    const lines = [...props].filter(p => !/^[#@]/.test(p) && el.style.getPropertyValue(p)).map(p => `  ${p}: ${el.style.getPropertyValue(p)};`)
+    const lines = [...props].filter(p => !/^[#@%]/.test(p) && !isStateKey(p) && el.style.getPropertyValue(p)).map(p => `  ${p}: ${el.style.getPropertyValue(p)};`)
     if (props.has('#text')) lines.push(`  /* text: ${JSON.stringify(el.textContent?.trim().slice(0, 120))} */`)
+    const st = [...(stateRules.get(el) ?? [])]
+    const blocks = [lines.length ? `${selector(el)} {\n${lines.join('\n')}\n}` : '', ...STATES.map(s => {
+      const l = st.filter(([k]) => k.startsWith(s + ':')).map(([k, v]) => `  ${k.slice(s.length + 1)}: ${v};`)
+      return l.length ? `${selector(el)}:${s} {\n${l.join('\n')}\n}` : ''
+    })].filter(Boolean)
     const owner = reactName(el, true)
-    if (!lines.length) continue
+    if (!blocks.length) continue
     const w = el.ownerDocument === document ? 0 : el.ownerDocument.defaultView?.innerWidth ?? 0
     if (!groups.has(w)) groups.set(w, [])
-    groups.get(w)!.push(`${owner ? `/* <${owner}> */\n` : ''}${selector(el)} {\n${lines.join('\n')}\n}`)
+    groups.get(w)!.push(`${owner ? `/* <${owner}> */\n` : ''}${blocks.join('\n')}`)
   }
   const out = [...(groups.get(0) ?? [])]
   for (const [w, blocks] of [...groups].filter(([w]) => w).sort((a, b) => b[0] - a[0])) {
@@ -1110,10 +1234,55 @@ function PreviewTile({ el }: { el: HTMLElement }) {
   )
 }
 
+const STATE_OPTS = [['default', 'Default'], ['hover', 'Hover'], ['focus', 'Focus'], ['active', 'Active']] as const
+function StateBar({ el }: { el: HTMLElement }) {
+  const st = forced.get(el)
+  return (
+    <div className="stbar">
+      <Seg value={st ?? 'default'} options={STATE_OPTS} onChange={v => forceState(el, v === 'default' ? null : v)} />
+      {st && <p className="stnote">Showing :{st}. Edits apply only in this state and write as <code>{st}:</code> classes.</p>}
+    </div>
+  )
+}
+/** Read-only summary of a prop that isn't a plain value. */
+function describe(v: unknown): string {
+  if (typeof v === 'function') return `ƒ ${v.name || 'anonymous'}()`
+  if (v === null || v === undefined) return String(v)
+  if (Array.isArray(v)) return `[${v.length} item${v.length === 1 ? '' : 's'}]`
+  if (typeof v === 'object') {
+    const t = (v as { $$typeof?: unknown; type?: unknown }).$$typeof ? (v as { type: unknown }).type : undefined
+    if (t !== undefined) return `<${typeof t === 'string' ? t : typeName(t) ?? 'Element'} />`
+    const k = Object.keys(v)
+    return `{ ${k.slice(0, 3).join(', ')}${k.length > 3 ? ', …' : ''} }`
+  }
+  return String(v)
+}
+function PropsSection({ el }: { el: HTMLElement }) {
+  const f = componentFiber(el)
+  if (!f) return null
+  const props = Object.entries(currentProps(f)).filter(([k]) => k !== 'data-wsrc-c')
+  if (!props.length) return null
+  const host = hostOf(f) ?? el, live = !!renderer(el.ownerDocument)
+  const set = (k: string) => (v: unknown) => setProp(f, host, k, v)
+  return (
+    <Section title={`<${typeName(f.type)}> props`} n={props.length}>
+      {props.map(([k, v]) => (
+        <Row key={k} label={<span className="mono" title={k}>{k}</span>}>
+          {live && typeof v === 'string' ? <Field value={v} onChange={set(k)} />
+            : live && typeof v === 'number' ? <Num value={v} unit="" onChange={s => { const n = parseFloat(s); if (!isNaN(n)) set(k)(n) }} />
+            : live && typeof v === 'boolean' ? <Check checked={v} onChange={set(k)}>{String(v)}</Check>
+            : <span className="pval mono" title={describe(v)}>{describe(v)}</span>}
+        </Row>
+      ))}
+      {!live && <p className="empty">Add the <code>watcher-ui/vite</code> plugin to edit props live.</p>}
+    </Section>
+  )
+}
+
 function DesignTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement | null) => void }) {
   const cs = getComputedStyle(el), r = el.getBoundingClientRect(), { o, z } = ctxOf(el)
   const get = (p: string) => cs.getPropertyValue(p)
-  const set = (p: string) => (v: string) => setStyle(el, p, v)
+  const set = (p: string) => (v: string) => editStyle(el, p, v)
   const [px, py] = getPos(el)
   const x = (r.left - o.x) / z, y = (r.top - o.y) / z
   const flex = cs.display.includes('flex'), grid = cs.display.includes('grid')
@@ -1134,6 +1303,8 @@ function DesignTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement |
   return (
     <>
       <Crumbs el={el} select={select} />
+      <StateBar el={el} />
+      <PropsSection el={el} />
       <Section title="Frame">
         <Lbl>Position</Lbl>
         <div className="g2"><Num suffix="X" value={x} onChange={moveTo('x')} /><Num suffix="Y" value={y} onChange={moveTo('y')} /></div>
@@ -1185,7 +1356,7 @@ function DesignTab({ el, select }: { el: HTMLElement; select: (el: HTMLElement |
 
       <Section title="Appearance">
         <Row label="Opacity">
-          <Num suffix="%" value={round(parseFloat(cs.opacity) * 100)} unit="" onChange={v => { const n = parseFloat(v); if (!isNaN(n)) setStyle(el, 'opacity', String(Math.min(100, Math.max(0, n)) / 100)) }} />
+          <Num suffix="%" value={round(parseFloat(cs.opacity) * 100)} unit="" onChange={v => { const n = parseFloat(v); if (!isNaN(n)) editStyle(el, 'opacity', String(Math.min(100, Math.max(0, n)) / 100)) }} />
         </Row>
         <Row label="Radius"><Num suffix="px" value={cs.borderTopLeftRadius} onChange={set('border-radius')} /></Row>
         <Row label="Fill"><Color value={cs.backgroundColor} onChange={set('background-color')} /></Row>
@@ -1216,7 +1387,7 @@ function PrototypeTab({ el, select }: { el: HTMLElement; select: (el: HTMLElemen
   const handlers = Object.entries(reactProps(el) ?? {}).filter(([k, v]) => /^on[A-Z]/.test(k) && typeof v === 'function') as [string, (...a: unknown[]) => unknown][]
   const attr = (n: string) => el.getAttribute(n) ?? ''
   const setA = (n: string) => (v: string) => setAttr(el, n, v)
-  const set = (p: string) => (v: string) => setStyle(el, p, v)
+  const set = (p: string) => (v: string) => editStyle(el, p, v)
   return (
     <>
       <Crumbs el={el} select={select} />
@@ -1647,7 +1818,7 @@ function Profiler() {
     id = requestAnimationFrame(raf)
     const mo = new MutationObserver(list => {
       muts += list.length; perf.mutTotal += list.length
-      if (prefs.flashUpdates) for (const m of list.slice(0, 60)) flash(m.target, 'dom')
+      if (prefs.flashUpdates) for (const m of list.slice(0, 60)) if (!m.attributeName?.startsWith('data-w')) flash(m.target, 'dom')
     })
     mo.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true })
     // buffered observers replay history, so start those lists from scratch on every mount
@@ -1711,56 +1882,69 @@ function Profiler() {
 
 // ── write-back: inspector edits → Tailwind classes in your JSX (via watcher-ui/vite) ──
 type SrcResult = { loc: string; ok: boolean; error?: string; note?: string; before?: string; after?: string; text?: boolean
-  mapped: { prop: string; value: string; cls: string }[]; skipped: { prop: string; value: string; reason: string }[] }
+  mapped: { prop: string; value: string; cls: string }[]; skipped: { prop: string; value: string; reason: string }[]; props?: string[]; variant?: string }
 type ApplyResponse = { files: { file: string; changed: boolean; results: SrcResult[] }[]; error?: string }
-type Pending = { els: HTMLElement[]; file: string; loc: string; line: number; styles: Record<string, string>; text?: string; attrs?: Record<string, string | null>; variant: string; repeats: number }
+type Pending = { els: HTMLElement[]; file: string; loc: string; line: number; styles: Record<string, string>; text?: string; attrs?: Record<string, string | null>; variant: string; repeats: number
+  props?: Record<string, unknown>; state?: string; comp?: string }
 const BREAKPOINTS: [string, number][] = [['sm', 640], ['md', 768], ['lg', 1024], ['xl', 1280], ['2xl', 1536]]
 /** "file:line:col" stamped by the Vite plugin. */
-function sourceOf(el: Element) {
-  const m = /^(.*):(\d+):(\d+)$/.exec(el.getAttribute('data-wsrc') ?? '')
-  return m ? { file: m[1], line: +m[2], col: +m[3], loc: `${m[2]}:${m[3]}` } : null
-}
+const parseSrc = (s: string) => { const m = /^(.*):(\d+):(\d+)$/.exec(s); return m ? { file: m[1], line: +m[2], col: +m[3], loc: `${m[2]}:${m[3]}` } : null }
+const sourceOf = (el: Element) => parseSrc(el.getAttribute('data-wsrc') ?? '')
 const openInEditor = (el: Element) => { const s = sourceOf(el); if (s) void fetch(`/__open-in-editor?file=${encodeURIComponent(`${s.file}:${s.line}:${s.col + 1}`)}`) }
-/** Edits that can go to source, grouped by the JSX element they came from. */
+/** Edits that can go to source, grouped by the JSX element (and variant) they came from. */
 function pendingEdits() {
   const byKey = new Map<string, Pending>(), orphans: HTMLElement[] = []
-  for (const [el, props] of changes) {
-    if (!el.isConnected) continue
-    const styles: Record<string, string> = {}, attrs: Record<string, string | null> = {}
+  const put = (el: HTMLElement, src: { file: string; loc: string; line: number }, variant: string, part: Partial<Pending>, repeats: number) => {
+    const key = `${src.file}|${src.loc}|${variant}`, prev = byKey.get(key)
+    if (!prev) { byKey.set(key, { els: [el], file: src.file, loc: src.loc, line: src.line, variant, styles: {}, repeats, ...part }); return }
+    if (!prev.els.includes(el)) prev.els.push(el)
+    Object.assign(prev.styles, part.styles)
+    if (part.props) prev.props = { ...prev.props, ...part.props }
+  }
+  const hex = (v: string) => (/^rgba?\(/.test(v) ? colorOut(v) : v) // the browser hands back rgb(); classes read better as hex
+  for (const [el, props] of liveEdits()) {
+    const styles: Record<string, string> = {}, attrs: Record<string, string | null> = {}, inState: Record<string, Record<string, string>> = {}
+    const comp = new Map<Fiber, Record<string, unknown>>()
     let text: string | undefined
     for (const p of props) {
       if (p === '#text') text = el.textContent?.trim() ?? ''
       else if (p[0] === '@') attrs[p.slice(1)] = el.getAttribute(p.slice(1))
-      else if (p[0] !== '#') { const v = el.style.getPropertyValue(p); if (v) styles[p] = /^rgba?\(/.test(v) ? colorOut(v) : v } // the browser hands back rgb(); classes read better as hex
+      else if (p[0] === '%') {
+        const f = hist.filter(h => h.el === el && h.prop === p).at(-1)?.fiber
+        if (f) { if (!comp.has(f)) comp.set(f, {}); comp.get(f)![p.slice(1)] = currentProps(f)[p.slice(1)] ?? null }
+      } else if (isStateKey(p)) { const i = p.indexOf(':'), v = getStateRule(el, p); if (v) (inState[p.slice(0, i)] ??= {})[p.slice(i + 1)] = hex(v) }
+      else if (p[0] !== '#') { const v = el.style.getPropertyValue(p); if (v) styles[p] = hex(v) }
     }
-    if (!Object.keys(styles).length && !Object.keys(attrs).length && text === undefined) continue
+    // props are written where the component is used, not inside it
+    for (const [f, vals] of comp) {
+      const at = parseSrc(String(currentProps(f)['data-wsrc-c'] ?? ''))
+      if (at) put(el, at, '', { props: vals, comp: typeName(f.type) ?? undefined }, 1); else orphans.push(el)
+    }
+    const own = Object.keys(styles).length || Object.keys(attrs).length || text !== undefined
+    if (!own && !Object.keys(inState).length) continue
     const src = sourceOf(el)
     if (!src) { orphans.push(el); continue }
-    // edits made inside a responsive preview get that width's Tailwind breakpoint (mobile-first)
+    // edits made inside a responsive preview get that width's Tailwind breakpoint (mobile-first); state edits add hover: etc.
     const w = el.ownerDocument === document ? 0 : el.ownerDocument.defaultView?.innerWidth ?? 0
     const bp = w ? BREAKPOINTS.filter(([, min]) => w >= min).at(-1)?.[0] : undefined
     const variant = bp ? bp + ':' : ''
-    const key = `${src.file}|${src.loc}|${variant}`
-    const prev = byKey.get(key)
-    if (prev) { prev.els.push(el); Object.assign(prev.styles, styles); continue }
-    byKey.set(key, {
-      els: [el], file: src.file, loc: src.loc, line: src.line, variant, text, styles,
-      attrs: Object.keys(attrs).length ? attrs : undefined,
-      repeats: el.ownerDocument.querySelectorAll(`[data-wsrc="${el.getAttribute('data-wsrc')!.replace(/"/g, '\\"')}"]`).length,
-    })
+    const repeats = el.ownerDocument.querySelectorAll(`[data-wsrc="${el.getAttribute('data-wsrc')!.replace(/"/g, '\\"')}"]`).length
+    if (own) put(el, src, variant, { styles, text, attrs: Object.keys(attrs).length ? attrs : undefined }, repeats)
+    for (const [st, css] of Object.entries(inState)) put(el, src, variant + st + ':', { styles: css, state: st }, repeats)
   }
   return { items: [...byKey.values()], orphans }
 }
 async function postApply(items: Pending[], dryRun: boolean): Promise<ApplyResponse> {
   const r = await fetch('/__watcher/apply', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-watcher': '1' },
-    body: JSON.stringify({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant }) => ({ file, loc, styles, text, attrs, variant })) }),
+    body: JSON.stringify({ dryRun, edits: items.map(({ file, loc, styles, text, attrs, variant, props }) => ({ file, loc, styles, text, attrs, variant, props })) }),
   })
   return r.json()
 }
 /** After a successful write: the source now carries the change, so drop our inline preview of it. */
 function settle(it: Pending, r: SrcResult) {
-  const done = new Set([...r.mapped.map(m => m.prop), ...(r.text ? ['#text'] : []), ...Object.keys(it.attrs ?? {}).map(a => '@' + a)])
+  const pre = it.state ? it.state + ':' : ''
+  const done = new Set([...r.mapped.map(m => pre + m.prop), ...(r.text ? ['#text'] : []), ...Object.keys(it.attrs ?? {}).map(a => '@' + a), ...(r.props ?? []).map(p => '%' + p)])
   for (const el of it.els) {
     for (let i = hist.length - 1; i >= 0; i--) if (hist[i].el === el && done.has(hist[i].prop)) hist.splice(i, 1)
     const set = changes.get(el)
@@ -1769,7 +1953,7 @@ function settle(it: Pending, r: SrcResult) {
     // keep the inline style until hot reload has put the new classes on the element, then remove it
     const styles = r.mapped.map(m => m.prop)
     if (!styles.length) continue
-    const drop = () => { mo.disconnect(); clearTimeout(t); for (const p of styles) el.style.removeProperty(p); bump() }
+    const drop = () => { mo.disconnect(); clearTimeout(t); for (const p of styles) { if (pre) setStateRule(el, pre + p, ''); else el.style.removeProperty(p) } bump() }
     const mo = new MutationObserver(drop), t = setTimeout(drop, 2500)
     mo.observe(el, { attributes: true, attributeFilter: ['class'] })
   }
@@ -1793,21 +1977,21 @@ function CodePanel({ rev }: { rev: number }) {
     fetch('/__watcher/ping').then(r => (r.ok ? r.json() : null)).then(j => setServer(j?.ok ? j.tailwind : 'missing')).catch(() => setServer('missing'))
   }, [])
   const { items, orphans } = pendingEdits()
-  const key = JSON.stringify(items.map(i => [i.file, i.loc, i.variant, i.styles, i.text, i.attrs]))
+  const key = JSON.stringify(items.map(i => [i.file, i.loc, i.variant, i.styles, i.text, i.attrs, i.props]))
   useEffect(() => {
     if (typeof server !== 'number' || !items.length) { setPlan(null); return }
     let alive = true
     postApply(items, true).then(p => { if (alive) setPlan(p) }).catch(() => {})
     return () => { alive = false }
   }, [key, server]) // eslint-disable-line react-hooks/exhaustive-deps
-  const resultFor = (it: Pending) => plan?.files.find(f => f.file === it.file)?.results.find(r => r.loc === it.loc)
-  const writable = items.filter(it => { const r = resultFor(it); return r?.ok && (r.mapped.length || r.text || it.attrs) })
+  const resultFor = (it: Pending) => plan?.files.find(f => f.file === it.file)?.results.find(r => r.loc === it.loc && (r.variant ?? '') === it.variant)
+  const writable = items.filter(it => { const r = resultFor(it); return r?.ok && (r.mapped.length || r.text || it.attrs || r.props?.length) })
   const apply = async () => {
     setBusy(true)
     try {
       const res = await postApply(writable, false)
       let n = 0
-      for (const it of writable) { const r = res.files.find(f => f.file === it.file)?.results.find(x => x.loc === it.loc); if (r?.ok) { settle(it, r); n++ } }
+      for (const it of writable) { const r = res.files.find(f => f.file === it.file)?.results.find(x => x.loc === it.loc && (x.variant ?? '') === it.variant); if (r?.ok) { settle(it, r); n++ } }
       const files = res.files.filter(f => f.changed).length
       notify(`Wrote ${n} element${n === 1 ? '' : 's'} to ${files} file${files === 1 ? '' : 's'}`)
       bump()
@@ -1832,8 +2016,9 @@ plugins: [watcher(), react(), tailwindcss()]`}</pre>
           return (
             <div key={it.file + it.loc + it.variant} className="citem">
               <div className="chead">
-                <b>{label(it.els[0])}</b>
-                {it.variant && <span className="cvar" data-tip="Edited in a responsive preview, so it applies from this breakpoint up">{it.variant}</span>}
+                <b>{it.comp ? `<${it.comp}>` : label(it.els[0])}</b>
+                {it.variant && <span className="cvar" data-tip={it.state ? `Edited while showing :${it.state}, so it only applies in that state` : 'Edited in a responsive preview, so it applies from this breakpoint up'}>{it.variant}</span>}
+                {it.props && <span className="cvar" data-tip="Props are written where the component is used">props</span>}
                 <span className="sp" />
                 <button className="clink" data-tip="Open in your editor" onClick={() => openInEditor(it.els[0])}>{it.file.split('/').pop()}:{it.line}</button>
               </div>
@@ -1843,6 +2028,7 @@ plugins: [watcher(), react(), tailwindcss()]`}</pre>
               {r?.mapped.map(m => <div key={m.prop} className="cmap"><span>{m.prop}: {m.value}</span><code>{m.cls}</code></div>)}
               {r?.text && <div className="cmap"><span>text</span><code>“{it.text}”</code></div>}
               {it.attrs && Object.entries(it.attrs).map(([k, v]) => <div key={k} className="cmap"><span>{k}</span><code>{v ?? 'removed'}</code></div>)}
+              {r?.props?.map(k => <div key={'%' + k} className="cmap"><span>{k}</span><code>{it.props?.[k] == null ? 'removed' : JSON.stringify(it.props[k])}</code></div>)}
               {r?.skipped.map(sk => <div key={sk.prop} className="cskip">{sk.prop}: {sk.reason}</div>)}
               {r?.note && <p className="cnote2">{r.note}</p>}
               <button className="b sm cdiscard" onClick={() => it.els.forEach(el => resetEdits(el))}>Discard</button>
@@ -2561,7 +2747,7 @@ function Overlay() {
     if (!cv.on) enterCanvas()
     else leaveCanvas()
   }
-  const close = () => { if (!cv.on || leaveCanvas()) { saveNow(); setOpen(false) } }
+  const close = () => { if (!cv.on || leaveCanvas()) { saveNow(); clearForced(); setOpen(false) } }
   L.toggleCanvas = toggleCanvas
   const saveNow = () => { if (!FRAME && prefs.persist && restoredPages.has(pageKey())) writePage(capturePage(L.guides)) }
   // restore this page's saved session once per load (after the app has had a moment to render)
@@ -2847,7 +3033,7 @@ function Overlay() {
           </div>
         )}
         {sel && sr && <>
-          <div className="pill" style={{ left: sr.left, top: Math.max(sr.top - 4, cy0 + 22), transform: 'translateY(-100%)' }}>{label(sel)}</div>
+          <div className="pill" style={{ left: sr.left, top: Math.max(sr.top - 4, cy0 + 22), transform: 'translateY(-100%)' }}>{label(sel)}{forced.get(sel) && <span className="pstate">:{forced.get(sel)}</span>}</div>
           <div className="pill" style={{ left: sr.left + sr.width / 2, top: sr.bottom + 6, transform: 'translateX(-50%)' }}>{round(sr.width / z)} × {round(sr.height / z)}</div>
           {!pe.el && HANDLES.map(([d, fx, fy]) => (
             <div key={d} className={'hd ' + d} style={{ left: sr.left + sr.width * fx, top: sr.top + sr.height * fy }} onPointerDown={e => startResize(e, d)} />
@@ -3137,6 +3323,11 @@ const CSS_TEXT = `
 
 .launch { all: unset; position: absolute; right: 16px; bottom: 16px; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--surface); color: var(--text); box-shadow: var(--shadow-raised); cursor: pointer; }
 .launch:hover { box-shadow: var(--shadow-raised), 0 0 0 2px var(--primary); }
+.stbar { margin: 2px 0 10px; }
+.stnote { margin: 6px 2px 0; font-size: 11px; line-height: 1.4; color: var(--text-muted); }
+.stnote code, .empty code { font-family: var(--mono); color: var(--primary); }
+.pstate { margin-left: 3px; opacity: .8; }
+.pval { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
 .launch-dot { position: absolute; top: 4px; right: 4px; width: 9px; height: 9px; border-radius: 50%; background: oklch(62% .2 300); box-shadow: 0 0 0 2px var(--surface); }
 .mark { position: relative; display: grid; padding: 0 2px; }
 

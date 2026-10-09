@@ -33,6 +33,12 @@ const send = (res: ServerResponse, status: number, data: unknown) => {
   res.statusCode = status; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(data))
 }
 
+// React hands its renderer (which can override a component's props) only to a DevTools hook that exists
+// before React loads. Installed unless the React DevTools extension already put one there.
+const DEVTOOLS_HOOK = `if(!window.__REACT_DEVTOOLS_GLOBAL_HOOK__){var r=new Map(),n=0,f=function(){};` +
+  `window.__REACT_DEVTOOLS_GLOBAL_HOOK__={renderers:r,supportsFiber:true,inject:function(i){r.set(++n,i);return n},` +
+  `onScheduleFiberRoot:f,onCommitFiberRoot:f,onCommitFiberUnmount:f,onPostCommitFiberRoot:f,checkDCE:f}}`
+
 export function watcher(opts: WatcherPluginOptions = {}): Plugin {
   let root = process.cwd()
   let ver: TwVersion = 4
@@ -40,6 +46,7 @@ export function watcher(opts: WatcherPluginOptions = {}): Plugin {
     name: 'watcher-ui',
     apply: 'serve',
     enforce: 'pre', // stamp the JSX before React's transform turns it into calls
+    transformIndexHtml: () => [{ tag: 'script', injectTo: 'head-prepend', children: DEVTOOLS_HOOK }],
     configResolved(c) { root = c.root; ver = opts.tailwind ?? detectTailwind(root) },
     transform(code, id) {
       const file = id.split('?')[0]

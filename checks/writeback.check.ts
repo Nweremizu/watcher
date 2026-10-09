@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { cssToTailwind, mergeClasses } from '../src/tailwind.ts'
 import { editSource, stampSource } from '../src/writeback.ts'
+import { forceSelectors } from '../src/states.ts'
 
 const tw = (p: string, v: string, ver: 3 | 4 = 4) => { const r = cssToTailwind(p, v, ver); return 'cls' in r ? r.cls : `!${r.reason}` }
 
@@ -45,7 +46,9 @@ const src = `export const A = () => (\n  <div className="p-4">\n    <h3>Hi</h3>\
 const stamped = stampSource(src, 'App.tsx')!.toString()
 assert.ok(stamped.includes('<div data-wsrc="App.tsx:2:2" className="p-4">'))
 assert.ok(stamped.includes('<h3 data-wsrc="App.tsx:3:4">'))
-assert.ok(!stamped.includes('<Card data-wsrc')) // components aren't DOM nodes
+assert.ok(stamped.includes('<Card data-wsrc-c="App.tsx:4:4" title="x" />')) // components get their call site
+assert.ok(!stampSource('const a = <><Fragment><Ctx.Provider value={1}><b /></Ctx.Provider></Fragment></>', 'a.tsx')!.toString().includes('wsrc-c'))
+assert.ok(stampSource('const a = <Select<number> v={1} />', 'a.tsx')!.toString().includes('<Select<number> data-wsrc-c'))
 
 // editing: className string, added className, text, attributes
 let out = editSource(src, [{ loc: '2:2', styles: { 'padding-top': '44px' } }, { loc: '3:4', styles: { color: '#f00' }, text: 'Hello there' }])
@@ -59,5 +62,21 @@ out = editSource(`const x = <div className={styles.box}>x</div>`, [{ loc: '1:10'
 assert.equal(out.results[0].ok, false)
 out = editSource(src, [{ loc: '9:9', text: 'x' }])
 assert.equal(out.results[0].ok, false)
+
+// component props at the call site
+out = editSource(src, [{ loc: '4:4', props: { title: 'New', count: 3, open: true, gone: null } }])
+assert.ok(out.code.includes('<Card count={3} open title="New" />'), out.code)
+out = editSource(`const x = <Card title={t('a')} label='a"b' on>Hi</Card>`, [{ loc: '1:10', props: { title: 'x', label: 'q', on: false, children: 'Yo' } }])
+assert.ok(out.code.includes(`<Card title={t('a')} label="q" on={false}>Yo</Card>`), out.code)
+assert.deepEqual(out.results[0].skipped.map(s => s.prop), ['title'])
+assert.deepEqual(out.results[0].props, ['label', 'on', 'children'])
+out = editSource(src, [{ loc: '4:4', props: { title: 'say "hi" & bye' } }])
+assert.ok(out.code.includes('<Card title={"say \\"hi\\" & bye"} />'), out.code)
+
+// forced states: rewrite pseudo-classes, but not escaped class names or media features
+assert.equal(forceSelectors('.btn:hover{color:red}'), '.btn[data-wforce~="hover"]{color:red}')
+assert.equal(forceSelectors('.hover\:bg-x{&:hover{@media (hover:hover){color:red}}}'), '.hover\:bg-x{&[data-wforce~="hover"]{@media (hover:hover){color:red}}}')
+assert.equal(forceSelectors('a:focus-visible, a:focus, .g:focus-within'), 'a[data-wforce~="focus-visible"], a[data-wforce~="focus"], .g[data-wforce~="focus-within"]')
+assert.equal(forceSelectors('.focus\:ring:focus'), '.focus\:ring[data-wforce~="focus"]')
 
 console.log('writeback checks ok')

@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/logo.svg" width="64" height="64" alt="Watcher"></p>
 
-<h1 align="center">watcher-ui</h1>
+<h1 align="center">@nweremizu/watcher-ui</h1>
 
 <p align="center">Open your running React app like a design file.</p>
 
@@ -21,14 +21,14 @@ Rulers and guides, live style editing, a free canvas, an SVG editor, design-syst
 **1. Install** it as a dev dependency:
 
 ```bash
-npm i -D watcher-ui
+npm i -D @nweremizu/watcher-ui
 ```
 
 **2. Render it** once, next to your app:
 
 ```tsx
 // main.tsx
-import { Watcher } from 'watcher-ui'
+import { Watcher } from '@nweremizu/watcher-ui'
 
 root.render(
   <>
@@ -42,7 +42,7 @@ root.render(
 
 ```ts
 // vite.config.ts
-import { watcher } from 'watcher-ui/vite'
+import { watcher } from '@nweremizu/watcher-ui/vite'
 
 export default defineConfig({
   plugins: [watcher(), react(), tailwindcss()],
@@ -82,7 +82,7 @@ Or from your own environment variable. Watcher can't read your env vars itself (
 
 ### Turning it off with an environment variable (Vite plugin)
 
-If you use `watcher-ui/vite`, it reads two variables. Put them in your shell or in any `.env` file next to your Vite root (`.env.local` keeps them to your machine):
+If you use `@nweremizu/watcher-ui/vite`, it reads two variables. Put them in your shell or in any `.env` file next to your Vite root (`.env.local` keeps them to your machine):
 
 | Variable | Values | Effect |
 |---|---|---|

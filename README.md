@@ -213,7 +213,7 @@ The **Default · Hover · Focus · Active** bar at the top of the inspector show
 
 ## Animation
 
-> **Not shipped yet.** The Animate tab is hidden while it's finished (`ANIMATE_TAB` in `src/overlay.tsx`). The timeline drawer (**M**) is available.
+> **Not shipped yet.** The Animate tab and the timeline drawer are hidden until they're finished (`ANIMATE_TAB` in `src/overlay.tsx`).
 
 ### Animations: what an element already does
 

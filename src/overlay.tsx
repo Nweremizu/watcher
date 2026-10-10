@@ -2225,13 +2225,15 @@ function Settings({ theme, setTheme, onClose }: { theme: 'light' | 'dark'; setTh
   )
 }
 
+// ponytail: the Animate tab and timeline drawer are unfinished, so they're hidden until they ship; flip this to bring them back
+const ANIMATE_TAB = false
 const KEYS: [string, string][] = [
   ['Select & move', 'V'], ['Rectangle', 'R'], ['Pen · vector', 'P'], ['Pencil', '⇧P'], ['Text', 'T · dbl-click'], ['Pan', 'H · Space'],
   ['Measure spacing', 'hold Alt'], ['Open in SVG editor', 'Enter · dbl-click'], ['Pick colour from screen', 'I'], ['Pixel grid', '⇧G'],
   ['Zoom', 'Ctrl + scroll'], ['Fit / 100%', '⇧1 / Ctrl 0'],
   ['Parent / child', '⇧↵ / ↵'], ['Deep select', 'Ctrl click'], ['Nudge', '← ↑ → ↓'], ['Hide element', 'Del'], ['Undo / redo', 'Ctrl Z / Ctrl ⇧Z'],
   ['Anatomy', 'hold ⇧ · A to lock'], ['Canvas mode', '⇧C'], ['Responsive preview', '⇧V'], ['X-ray', 'X'], ['Duplicate', 'Ctrl D · Alt drag'], ['Copy / paste', 'Ctrl C / V'], ['Forward / back', '] / ['],
-  ['Rulers', '⇧R'], ['Animation timeline', 'M'],
+  ['Rulers', '⇧R'], ...(ANIMATE_TAB ? [['Animation timeline', 'M'] as [string, string]] : []),
 ]
 const Help = () => (
   <div className="help">
@@ -2245,8 +2247,6 @@ type InspectorProps = {
   guide: Guide | null; updateGuide: (p: Partial<Guide>) => void; removeGuide: () => void
   theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void; onClose: () => void; onCode: () => void
 }
-// ponytail: the Animate tab is unfinished, so it's hidden until it ships; flip this to bring it back
-const ANIMATE_TAB = false
 let showInspectorTab: (t: 'design' | 'prototype' | 'animate') => void = () => {}
 const Inspector = memo(function Inspector({ el, rev, select, guide, updateGuide, removeGuide, theme, setTheme, onClose, onCode }: InspectorProps) {
   void rev // re-render trigger only
@@ -4153,7 +4153,7 @@ function Overlay() {
       else if (lk === 'i' && !e.shiftKey) eyedrop()
       else if (k === 'P' && e.shiftKey) setTool('draw')
       else if (lk === 'x' && !e.shiftKey) setXray(v => !v)
-      else if (lk === 'm' && !e.shiftKey && !FRAME) setTimeline(v => !v)
+      else if (ANIMATE_TAB && lk === 'm' && !e.shiftKey && !FRAME) setTimeline(v => !v)
       else if (lk === 'a' && !e.shiftKey) setAnatLock(v => !v)
       else if (!e.shiftKey && TOOL_KEYS[k]) setTool(TOOL_KEYS[k])
       else if (k === 'R' && e.shiftKey) setShow(v => ({ ...v, rulers: !v.rulers }))
@@ -4530,7 +4530,7 @@ function Overlay() {
         {!covered && <div className="ablabel" style={{ left: ab.x, top: ab.y }}>{host}{location.pathname}</div>}
         {editing && <SvgEditor area={area} />}
         {resp && !editing && <Responsive area={area} value={resp} onChange={setResp} href={href} inspect={frameInspect} onInspect={setFrameInspect} />}
-        {timeline && !editing && <Timeline area={area} pick={el => { select(el); setRight('inspect'); setShow(v => ({ ...v, inspector: true })); if (ANIMATE_TAB) showInspectorTab('animate') }} />}
+        {ANIMATE_TAB && timeline && !editing && <Timeline area={area} pick={el => { select(el); setRight('inspect'); setShow(v => ({ ...v, inspector: true })); if (ANIMATE_TAB) showInspectorTab('animate') }} />}
 
         {stage}
 
@@ -4607,7 +4607,7 @@ function Overlay() {
         <button className={'b' + (grid ? ' tg' : '')} data-tip="Pixel grid · ⇧G" onClick={() => setGrid(v => !v)}><Icon d={P.grid} /></button>
         <i className="sep" />
         <button className={'b' + (xray ? ' on' : '')} data-tip="X-ray · X" onClick={() => setXray(v => !v)}><Icon d={P.xray} /></button>
-        <button className={'b' + (timeline ? ' on' : '')} data-tip="Timeline · M" onClick={() => setTimeline(v => !v)}><Icon d={P.timer} /></button>
+        {ANIMATE_TAB && <button className={'b' + (timeline ? ' on' : '')} data-tip="Timeline · M" onClick={() => setTimeline(v => !v)}><Icon d={P.timer} /></button>}
         <button className={'b' + (right === 'ds' ? ' tg' : '')} data-tip="Design system" onClick={() => { setRight(r => (r === 'ds' ? 'inspect' : 'ds')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.palette} /></button>
         <button className={'b' + (right === 'perf' ? ' tg' : '')} data-tip="Profiler" onClick={() => { setRight(r => (r === 'perf' ? 'inspect' : 'perf')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.pulse} /></button>
         <button className={'b' + (right === 'checks' ? ' tg' : '')} data-tip="Checks: tokens & accessibility" onClick={() => { setRight(r => (r === 'checks' ? 'inspect' : 'checks')); setShow(v => ({ ...v, inspector: true })) }}><Icon d={P.shield} /></button>

@@ -19,6 +19,9 @@
   "engines": {
     "node": ">=18"
   },
+  "repository": { "type": "git", "url": "git+https://github.com/nweremizu/watcher.git" },
+"homepage": "https://github.com/nweremizu/watcher#readme",
+"bugs": "https://github.com/nweremizu/watcher/issues",
   "type": "module",
   "sideEffects": false,
   "exports": {

@@ -1,6 +1,6 @@
 {
   "name": "@nweremizu/watcher-ui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Open your running React app like a design file: rulers, live style editing, canvas mode, an SVG editor, design-system extraction and a profiler. Dev-only, zero bytes in production.",
   "keywords": [
     "react",
